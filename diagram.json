@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "author": "CoCIS Smart Control System - BSE III / CS II",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-esp32-devkit-c-v4",
+      "id": "esp",
+      "top": 0,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-servo",
+      "id": "servo1",
+      "top": -40,
+      "left": 280,
+      "attrs": { "horn": "double" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led_green",
+      "top": 140,
+      "left": 280,
+      "attrs": { "color": "green" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led_red",
+      "top": 180,
+      "left": 280,
+      "attrs": { "color": "red" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led_room1",
+      "top": 140,
+      "left": 360,
+      "attrs": { "color": "yellow", "label": "Room1 Light" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led_room2",
+      "top": 180,
+      "left": 360,
+      "attrs": { "color": "orange", "label": "Room2 Light" }
+    },
+    {
+      "type": "wokwi-buzzer",
+      "id": "buzzer1",
+      "top": 230,
+      "left": 280,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-pir-motion-sensor",
+      "id": "pir1",
+      "top": -20,
+      "left": 420,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-pir-motion-sensor",
+      "id": "pir2",
+      "top": 60,
+      "left": 420,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn_entry_valid",
+      "top": 280,
+      "left": 0,
+      "attrs": { "color": "green", "label": "ENTRY VALID" }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn_entry_invalid",
+      "top": 280,
+      "left": 100,
+      "attrs": { "color": "red", "label": "ENTRY INVALID" }
+    },
+    {
+      "type": "wokwi-pushbutton",
+      "id": "btn_exit",
+      "top": 280,
+      "left": 200,
+      "attrs": { "color": "blue", "label": "EXIT" }
+    },
+    {
+      "type": "wokwi-text",
+      "id": "title",
+      "top": -80,
+      "left": 0,
+      "attrs": {
+        "text": "CoCIS Smart Control & Monitoring System\nESP-IDF | Entrance + 2 Lecture Rooms"
+      }
+    }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+
+    [ "esp:13", "servo1:PWM", "green", [ "h20", "v0" ] ],
+    [ "esp:GND.2", "servo1:GND", "black", [ "h0", "v20" ] ],
+    [ "esp:5V", "servo1:V+", "red", [ "h0", "v-20" ] ],
+
+    [ "esp:25", "led_green:A", "green", [ "h30", "v0" ] ],
+    [ "esp:GND.2", "led_green:C", "black", [ "h0", "v40" ] ],
+
+    [ "esp:26", "led_red:A", "red", [ "h40", "v0" ] ],
+    [ "esp:GND.2", "led_red:C", "black", [ "h0", "v60" ] ],
+
+    [ "esp:27", "led_room1:A", "yellow", [ "h50", "v0" ] ],
+    [ "esp:GND.2", "led_room1:C", "black", [ "h0", "v80" ] ],
+
+    [ "esp:14", "led_room2:A", "orange", [ "h60", "v0" ] ],
+    [ "esp:GND.2", "led_room2:C", "black", [ "h0", "v100" ] ],
+
+    [ "esp:32", "buzzer1:1", "purple", [ "h20", "v0" ] ],
+    [ "esp:GND.2", "buzzer1:2", "black", [ "h0", "v120" ] ],
+
+    [ "esp:34", "pir1:OUT", "blue", [ "h80", "v0" ] ],
+    [ "esp:3V3", "pir1:VCC", "red", [ "h0", "v-40" ] ],
+    [ "esp:GND.3", "pir1:GND", "black", [ "h0", "v-20" ] ],
+
+    [ "esp:35", "pir2:OUT", "cyan", [ "h90", "v0" ] ],
+    [ "esp:3V3", "pir2:VCC", "red", [ "h0", "v-60" ] ],
+    [ "esp:GND.3", "pir2:GND", "black", [ "h0", "v-40" ] ],
+
+    [ "esp:18", "btn_entry_valid:1.l", "green", [ "h0", "v20" ] ],
+    [ "esp:GND.1", "btn_entry_valid:2.l", "black", [ "h0", "v40" ] ],
+
+    [ "esp:19", "btn_entry_invalid:1.l", "red", [ "h0", "v20" ] ],
+    [ "esp:GND.1", "btn_entry_invalid:2.l", "black", [ "h0", "v40" ] ],
+
+    [ "esp:21", "btn_exit:1.l", "blue", [ "h0", "v20" ] ],
+    [ "esp:GND.1", "btn_exit:2.l", "black", [ "h0", "v40" ] ]
+  ],
+  "dependencies": {}
+}
