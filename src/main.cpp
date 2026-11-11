@@ -1,28 +1,89 @@
-/*
- * CoCIS Smart Control and Monitoring System 
- * ESP-IDF + Wokwi
- * MADETE HECTOR 24/U/25933/EVE 2400725933
- */
-
+/******************************************************************************
+ *  CoCIS Smart Control and Monitoring System (SCMS)
+ *  Terminal  : MAIN BUILDING CONTROLLER
+ *  Target    : ESP32 DevKit, ESP-IDF, Wokwi simulator
+ *  Author    : MADETE HECTOR  24/U/25933/EVE  2400725933
+ ******************************************************************************
+ *This project presents a practical, implementable design and simulation of a Smart Control and Monitoring System that addresses access control, occupancy tracking, intelligent lighting, data logging, configurable schedules and multi-device coordination using ESP32 microcontrollers on the Wokwi platform with ESP-IDF
+ *
+ * Responsibilities of this terminal
+ *   - Access control at the main entrance (valid / invalid card simulation)
+ *   - Door actuation via servo motor
+ *   - Building occupancy counter (who is currently inside)
+ *   - Configurable access schedule (start/end time), stored in NVS
+ *   - Authenticated serial management console (password protected)
+ *   - SD card storage for access event logging
+ *   - Real-time clock via SNTP (NTP over Wi-Fi)
+ *   - Status display on SSD1306 OLED (128×64)
+ *   - Automatic room lighting control based on PIR motion sensors
+ *
+ *  Main features
+ *   - Access granted only within the configured schedule
+ *   - Simple anti-re-entry check (card already marked as inside is denied)
+ *   - Failed access indication (red LED + buzzer pattern)
+ *   - Successful access indication (green LED + short buzzer beep + door open)
+ *   - Two independent rooms with PIR-triggered lights and timeout
+ *   - Live status on OLED: time, occupancy, door state, room lights,
+ *     schedule and SD-card health
+ *   - All access events written to /sdcard/access_log.txt
+ *
+ *  Hardware used
+ *   - Servo door                  → GPIO 13
+ *   - Green LED (access granted)  → GPIO 25
+ *   - Red LED (access denied)     → GPIO 26
+ *   - Room 1 light                → GPIO 27
+ *   - Room 2 light                → GPIO 14
+ *   - Buzzer                      → GPIO 32
+ *   - PIR sensor Room 1           → GPIO 34
+ *   - PIR sensor Room 2           → GPIO 35
+ *   - ENTRY OK button             → GPIO 18
+ *   - ENTRY BAD button            → GPIO 19
+ *   - EXIT button                 → GPIO 21
+ *   - OLED SSD1306 (I2C)          → SDA=23, SCL=22
+ *   - microSD card (SPI)          → CS=5, SCK=15, MOSI=16, MISO=17
+ *
+ *  In Wokwi the RFID reader is emulated:
+ *   - “ENTRY OK” button simulates a valid registered card
+ *   - “ENTRY BAD” button simulates an unregistered / invalid card
+ *   - “EXIT” button simulates a card leaving the building
+ *
+ *****************************************************************************/
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <time.h>
+#include <sys/time.h>
+#include <sys/unistd.h>
+#include <sys/stat.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "driver/i2c.h"
+#include "driver/spi_common.h"
+#include "driver/sdspi_host.h"
+#include "sdmmc_cmd.h"
+#include "esp_vfs_fat.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_err.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_timer.h"
+#include "esp_netif.h"
+#include "esp_wifi.h"
+#include "esp_sntp.h"
 
 static const char *TAG = "CoCIS";
+
+/* ===================== WIFI CONFIG ===================== */
+#define WIFI_SSID "Wokwi-GUEST"
+#define WIFI_PASS ""
 
 /* ===================== PINS ===================== */
 #define PIN_SERVO ((gpio_num_t)13)
@@ -37,12 +98,28 @@ static const char *TAG = "CoCIS";
 #define PIN_BTN_ENTRY_BAD ((gpio_num_t)19)
 #define PIN_BTN_EXIT ((gpio_num_t)21)
 
+/* OLED I2C */
+#define PIN_OLED_SDA ((gpio_num_t)23)
+#define PIN_OLED_SCL ((gpio_num_t)22)
+#define OLED_I2C_ADDR 0x3C
+#define OLED_WIDTH 128
+#define OLED_HEIGHT 64
+
+/* microSD (SPI) */
+#define PIN_SD_CS ((gpio_num_t)5)
+#define PIN_SD_SCK ((gpio_num_t)15)
+#define PIN_SD_MOSI ((gpio_num_t)16)
+#define PIN_SD_MISO ((gpio_num_t)17)
+#define MOUNT_POINT "/sdcard"
+
 /* ===================== CONSTANTS ===================== */
 #define DOOR_OPEN_MS 2500
 #define LIGHT_TIMEOUT_MS 8000
 #define MENU_PASSWORD "cocis2026"
 #define MAX_USERS 8
 #define DEBOUNCE_MS 250
+#define I2C_MASTER_NUM I2C_NUM_0
+#define I2C_MASTER_FREQ_HZ 400000
 
 /* ===================== STRUCTURES ===================== */
 typedef struct
@@ -76,18 +153,325 @@ static system_state_t g_state;
 static SemaphoreHandle_t g_state_mutex = NULL;
 static user_t g_users[MAX_USERS];
 static int g_user_count = 0;
-static int64_t g_time_offset_sec = 8 * 3600; // start at 08:00
+static time_t g_time_manual_offset_sec = 0;
+static bool g_sd_ok = false;
+
+/* OLED framebuffer */
+static uint8_t g_oled_fb[OLED_WIDTH * OLED_HEIGHT / 8];
+
+/* ===================== 5x7 FONT ===================== */
+static const uint8_t font5x7[][5] = {
+    {0x00, 0x00, 0x00, 0x00, 0x00}, //
+    {0x00, 0x00, 0x5F, 0x00, 0x00}, // !
+    {0x00, 0x07, 0x00, 0x07, 0x00}, // "
+    {0x14, 0x7F, 0x14, 0x7F, 0x14}, // #
+    {0x24, 0x2A, 0x7F, 0x2A, 0x12}, // $
+    {0x23, 0x13, 0x08, 0x64, 0x62}, // %
+    {0x36, 0x49, 0x55, 0x22, 0x50}, // &
+    {0x00, 0x05, 0x03, 0x00, 0x00}, // '
+    {0x00, 0x1C, 0x22, 0x41, 0x00}, // (
+    {0x00, 0x41, 0x22, 0x1C, 0x00}, // )
+    {0x08, 0x2A, 0x1C, 0x2A, 0x08}, // *
+    {0x08, 0x08, 0x3E, 0x08, 0x08}, // +
+    {0x00, 0x50, 0x30, 0x00, 0x00}, // ,
+    {0x08, 0x08, 0x08, 0x08, 0x08}, // -
+    {0x00, 0x60, 0x60, 0x00, 0x00}, // .
+    {0x20, 0x10, 0x08, 0x04, 0x02}, // /
+    {0x3E, 0x51, 0x49, 0x45, 0x3E}, // 0
+    {0x00, 0x42, 0x7F, 0x40, 0x00}, // 1
+    {0x42, 0x61, 0x51, 0x49, 0x46}, // 2
+    {0x21, 0x41, 0x45, 0x4B, 0x31}, // 3
+    {0x18, 0x14, 0x12, 0x7F, 0x10}, // 4
+    {0x27, 0x45, 0x45, 0x45, 0x39}, // 5
+    {0x3C, 0x4A, 0x49, 0x49, 0x30}, // 6
+    {0x01, 0x71, 0x09, 0x05, 0x03}, // 7
+    {0x36, 0x49, 0x49, 0x49, 0x36}, // 8
+    {0x06, 0x49, 0x49, 0x29, 0x1E}, // 9
+    {0x00, 0x36, 0x36, 0x00, 0x00}, // :
+    {0x00, 0x56, 0x36, 0x00, 0x00}, // ;
+    {0x00, 0x08, 0x14, 0x22, 0x41}, // <
+    {0x14, 0x14, 0x14, 0x14, 0x14}, // =
+    {0x41, 0x22, 0x14, 0x08, 0x00}, // >
+    {0x02, 0x01, 0x51, 0x09, 0x06}, // ?
+    {0x32, 0x49, 0x79, 0x41, 0x3E}, // @
+    {0x7E, 0x11, 0x11, 0x11, 0x7E}, // A
+    {0x7F, 0x49, 0x49, 0x49, 0x36}, // B
+    {0x3E, 0x41, 0x41, 0x41, 0x22}, // C
+    {0x7F, 0x41, 0x41, 0x22, 0x1C}, // D
+    {0x7F, 0x49, 0x49, 0x49, 0x41}, // E
+    {0x7F, 0x09, 0x09, 0x01, 0x01}, // F
+    {0x3E, 0x41, 0x41, 0x51, 0x32}, // G
+    {0x7F, 0x08, 0x08, 0x08, 0x7F}, // H
+    {0x00, 0x41, 0x7F, 0x41, 0x00}, // I
+    {0x20, 0x40, 0x41, 0x3F, 0x01}, // J
+    {0x7F, 0x08, 0x14, 0x22, 0x41}, // K
+    {0x7F, 0x40, 0x40, 0x40, 0x40}, // L
+    {0x7F, 0x02, 0x04, 0x02, 0x7F}, // M
+    {0x7F, 0x04, 0x08, 0x10, 0x7F}, // N
+    {0x3E, 0x41, 0x41, 0x41, 0x3E}, // O
+    {0x7F, 0x09, 0x09, 0x09, 0x06}, // P
+    {0x3E, 0x41, 0x51, 0x21, 0x5E}, // Q
+    {0x7F, 0x09, 0x19, 0x29, 0x46}, // R
+    {0x46, 0x49, 0x49, 0x49, 0x31}, // S
+    {0x01, 0x01, 0x7F, 0x01, 0x01}, // T
+    {0x3F, 0x40, 0x40, 0x40, 0x3F}, // U
+    {0x1F, 0x20, 0x40, 0x20, 0x1F}, // V
+    {0x7F, 0x20, 0x18, 0x20, 0x7F}, // W
+    {0x63, 0x14, 0x08, 0x14, 0x63}, // X
+    {0x03, 0x04, 0x78, 0x04, 0x03}, // Y
+    {0x61, 0x51, 0x49, 0x45, 0x43}, // Z
+};
+
+/* ===================== OLED DRIVER ===================== */
+static esp_err_t oled_cmd(uint8_t cmd)
+{
+    uint8_t buf[2] = {0x00, cmd};
+    return i2c_master_write_to_device(I2C_MASTER_NUM, OLED_I2C_ADDR, buf, 2, pdMS_TO_TICKS(100));
+}
+
+static void oled_clear(void)
+{
+    memset(g_oled_fb, 0, sizeof(g_oled_fb));
+}
+
+static void oled_set_pixel(int x, int y, bool on)
+{
+    if (x < 0 || x >= OLED_WIDTH || y < 0 || y >= OLED_HEIGHT)
+        return;
+    int idx = x + (y / 8) * OLED_WIDTH;
+    if (on)
+        g_oled_fb[idx] |= (1 << (y & 7));
+    else
+        g_oled_fb[idx] &= ~(1 << (y & 7));
+}
+
+static void oled_draw_char(int x, int y, char c)
+{
+    if (c < 32 || c > 90)
+        c = '?';
+    const uint8_t *glyph = font5x7[c - 32];
+    for (int col = 0; col < 5; col++)
+    {
+        uint8_t line = glyph[col];
+        for (int row = 0; row < 7; row++)
+        {
+            if (line & (1 << row))
+                oled_set_pixel(x + col, y + row, true);
+        }
+    }
+}
+
+static void oled_draw_string(int x, int y, const char *str)
+{
+    while (*str)
+    {
+        oled_draw_char(x, y, *str);
+        x += 6;
+        if (x > OLED_WIDTH - 6)
+            break;
+        str++;
+    }
+}
+
+static void oled_update(void)
+{
+    oled_cmd(0x21);
+    oled_cmd(0);
+    oled_cmd(127);
+    oled_cmd(0x22);
+    oled_cmd(0);
+    oled_cmd(7);
+
+    uint8_t buf[17];
+    buf[0] = 0x40;
+    for (int i = 0; i < (int)sizeof(g_oled_fb); i += 16)
+    {
+        memcpy(&buf[1], &g_oled_fb[i], 16);
+        i2c_master_write_to_device(I2C_MASTER_NUM, OLED_I2C_ADDR, buf, 17, pdMS_TO_TICKS(100));
+    }
+}
+
+static void oled_init(void)
+{
+    i2c_config_t conf;
+    memset(&conf, 0, sizeof(conf));
+    conf.mode = I2C_MODE_MASTER;
+    conf.sda_io_num = PIN_OLED_SDA;
+    conf.scl_io_num = PIN_OLED_SCL;
+    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.master.clk_speed = I2C_MASTER_FREQ_HZ;
+
+    ESP_ERROR_CHECK(i2c_param_config(I2C_MASTER_NUM, &conf));
+    ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0));
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    oled_cmd(0xAE);
+    oled_cmd(0xD5);
+    oled_cmd(0x80);
+    oled_cmd(0xA8);
+    oled_cmd(0x3F);
+    oled_cmd(0xD3);
+    oled_cmd(0x00);
+    oled_cmd(0x40);
+    oled_cmd(0x8D);
+    oled_cmd(0x14);
+    oled_cmd(0x20);
+    oled_cmd(0x00);
+    oled_cmd(0xA1);
+    oled_cmd(0xC8);
+    oled_cmd(0xDA);
+    oled_cmd(0x12);
+    oled_cmd(0x81);
+    oled_cmd(0xCF);
+    oled_cmd(0xD9);
+    oled_cmd(0xF1);
+    oled_cmd(0xDB);
+    oled_cmd(0x40);
+    oled_cmd(0xA4);
+    oled_cmd(0xA6);
+    oled_cmd(0xAF);
+
+    oled_clear();
+    oled_update();
+    ESP_LOGI(TAG, "OLED initialized (SDA=%d SCL=%d)", PIN_OLED_SDA, PIN_OLED_SCL);
+}
+
+/* ===================== SD CARD ===================== */
+static bool sd_init(void)
+{
+    esp_err_t ret;
+
+    // SPI bus
+    spi_bus_config_t bus_cfg;
+    memset(&bus_cfg, 0, sizeof(bus_cfg));
+    bus_cfg.mosi_io_num = PIN_SD_MOSI;
+    bus_cfg.miso_io_num = PIN_SD_MISO;
+    bus_cfg.sclk_io_num = PIN_SD_SCK;
+    bus_cfg.quadwp_io_num = -1;
+    bus_cfg.quadhd_io_num = -1;
+    bus_cfg.max_transfer_sz = 4000;
+
+    ret = spi_bus_initialize(SPI2_HOST, &bus_cfg, SDSPI_DEFAULT_DMA);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    // SD host
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    host.slot = SPI2_HOST;
+    host.max_freq_khz = 10000; // safer for Wokwi
+
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_config.gpio_cs = PIN_SD_CS;
+    slot_config.host_id = SPI2_HOST;
+
+    sdmmc_card_t *card;
+    esp_vfs_fat_sdmmc_mount_config_t mount_config;
+    memset(&mount_config, 0, sizeof(mount_config));
+    mount_config.format_if_mount_failed = true;
+    mount_config.max_files = 5;
+    mount_config.allocation_unit_size = 16 * 1024;
+
+    ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "SD mount failed (%s)", esp_err_to_name(ret));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "SD card mounted at %s", MOUNT_POINT);
+    sdmmc_card_print_info(stdout, card);
+    return true;
+}
+
+/* ===================== WIFI & NTP ===================== */
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data)
+{
+    if (event_id == WIFI_EVENT_STA_START)
+    {
+        esp_wifi_connect();
+    }
+    else if (event_id == WIFI_EVENT_STA_DISCONNECTED)
+    {
+        esp_wifi_connect();
+        ESP_LOGI(TAG, "Retrying Wi-Fi...");
+    }
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
+    }
+}
+
+static void wifi_init_sta(void)
+{
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler, NULL, NULL));
+
+    wifi_config_t wifi_config;
+    memset(&wifi_config, 0, sizeof(wifi_config));
+    strcpy((char *)wifi_config.sta.ssid, WIFI_SSID);
+    strcpy((char *)wifi_config.sta.password, WIFI_PASS);
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+}
+
+static void obtain_time(void)
+{
+    wifi_init_sta();
+
+    ESP_LOGI(TAG, "Initializing SNTP...");
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+
+    time_t now = 0;
+    struct tm timeinfo;
+    memset(&timeinfo, 0, sizeof(timeinfo));
+    int retry = 0;
+    const int retry_count = 15;
+
+    while (timeinfo.tm_year < (2025 - 1900) && ++retry < retry_count)
+    {
+        ESP_LOGI(TAG, "Waiting for time... (%d/%d)", retry, retry_count);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        time(&now);
+        localtime_r(&now, &timeinfo);
+    }
+
+    setenv("TZ", "UTC-3", 1);
+    tzset();
+    ESP_LOGI(TAG, "Time synchronized");
+}
 
 /* ===================== TIME ===================== */
 static void get_current_time(int *hour, int *min, int *sec)
 {
-    int64_t now = (esp_timer_get_time() / 1000000LL) + g_time_offset_sec;
-    int total_sec = (int)(now % 86400);
-    if (total_sec < 0)
-        total_sec += 86400;
-    *hour = total_sec / 3600;
-    *min = (total_sec % 3600) / 60;
-    *sec = total_sec % 60;
+    time_t now;
+    struct tm timeinfo;
+    memset(&timeinfo, 0, sizeof(timeinfo));
+    time(&now);
+    time_t adjusted = now + g_time_manual_offset_sec;
+    localtime_r(&adjusted, &timeinfo);
+    *hour = timeinfo.tm_hour;
+    *min = timeinfo.tm_min;
+    *sec = timeinfo.tm_sec;
 }
 
 static bool is_within_schedule(void)
@@ -189,8 +573,27 @@ static void log_event(const char *uid, const char *dir, const char *result)
     xSemaphoreTake(g_state_mutex, portMAX_DELAY);
     occ = g_state.occupancy;
     xSemaphoreGive(g_state_mutex);
+
+    // Always log to serial
     ESP_LOGI(TAG, "LOG %02d:%02d:%02d | UID=%s | %s | %s | occ=%d",
              h, m, s, uid, dir, result, occ);
+
+    // Also write to SD card
+    if (g_sd_ok)
+    {
+        FILE *f = fopen(MOUNT_POINT "/access_log.txt", "a");
+        if (f)
+        {
+            fprintf(f, "%02d:%02d:%02d,UID=%s,%s,%s,occ=%d\n",
+                    h, m, s, uid, dir, result, occ);
+            fclose(f);
+            ESP_LOGI(TAG, "Event written to SD card");
+        }
+        else
+        {
+            ESP_LOGW(TAG, "Failed to open access_log.txt on SD");
+        }
+    }
 }
 
 /* ===================== ACCESS LOGIC ===================== */
@@ -267,7 +670,52 @@ static void process_exit(const char *uid)
     door_open();
 }
 
-/* ===================== TASKS ===================== */
+/* ===================== DISPLAY TASK ===================== */
+static void display_task(void *arg)
+{
+    char line[22];
+
+    while (1)
+    {
+        int h, m, s;
+        get_current_time(&h, &m, &s);
+
+        xSemaphoreTake(g_state_mutex, portMAX_DELAY);
+        int32_t occ = g_state.occupancy;
+        bool door = g_state.door_open;
+        bool r1 = g_state.room1_light;
+        bool r2 = g_state.room2_light;
+        bool sched = is_within_schedule();
+        uint8_t sh = g_state.schedule.start_hour;
+        uint8_t sm = g_state.schedule.start_min;
+        uint8_t eh = g_state.schedule.end_hour;
+        uint8_t em = g_state.schedule.end_min;
+        xSemaphoreGive(g_state_mutex);
+
+        oled_clear();
+
+        oled_draw_string(0, 0, "COCIS SMART");
+        snprintf(line, sizeof(line), "TIME %02d:%02d:%02d", h, m, s);
+        oled_draw_string(0, 10, line);
+        snprintf(line, sizeof(line), "OCC:%ld  DOOR:%s", (long)occ, door ? "OPEN" : "CLSD");
+        oled_draw_string(0, 20, line);
+        snprintf(line, sizeof(line), "R1:%s  R2:%s", r1 ? "ON " : "OFF", r2 ? "ON " : "OFF");
+        oled_draw_string(0, 30, line);
+        snprintf(line, sizeof(line), "SCH %02d:%02d-%02d:%02d", sh, sm, eh, em);
+        oled_draw_string(0, 40, line);
+        snprintf(line, sizeof(line), "ACCESS:%s", sched ? "ALLOWED" : "DENIED");
+        oled_draw_string(0, 50, line);
+
+        // SD status
+        snprintf(line, sizeof(line), "SD:%s", g_sd_ok ? "OK" : "FAIL");
+        oled_draw_string(90, 50, line);
+
+        oled_update();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+/* ===================== OTHER TASKS ===================== */
 static void access_button_task(void *arg)
 {
     bool last_ok = true, last_bad = true, last_exit = true;
@@ -482,7 +930,7 @@ static void serial_menu_task(void *arg)
             }
             else if (strcmp(line, "7") == 0)
             {
-                g_time_offset_sec += 3600;
+                g_time_manual_offset_sec += 3600;
                 int h, m, s;
                 get_current_time(&h, &m, &s);
                 printf("Time advanced → now %02d:%02d:%02d\n", h, m, s);
@@ -495,6 +943,7 @@ static void serial_menu_task(void *arg)
                 printf("Occupancy    : %ld\n", (long)g_state.occupancy);
                 printf("Door         : %s\n", g_state.door_open ? "OPEN" : "CLOSED");
                 printf("Schedule OK  : %s\n", is_within_schedule() ? "YES" : "NO");
+                printf("SD Card      : %s\n", g_sd_ok ? "OK" : "FAIL");
                 printf("Free heap    : %lu\n", (unsigned long)esp_get_free_heap_size());
                 xSemaphoreGive(g_state_mutex);
                 print_menu();
@@ -539,6 +988,7 @@ static void gpio_init_all(void)
     pir.mode = GPIO_MODE_INPUT;
     gpio_config(&pir);
 
+    // LEDC (servo)
     ledc_timer_config_t tcfg;
     memset(&tcfg, 0, sizeof(tcfg));
     tcfg.speed_mode = LEDC_LOW_SPEED_MODE;
@@ -579,7 +1029,8 @@ extern "C" void app_main(void)
         nvs_flash_init();
     }
 
-    // Default schedule 08:00 - 18:00
+    obtain_time();
+
     g_state.schedule.start_hour = 8;
     g_state.schedule.start_min = 0;
     g_state.schedule.end_hour = 18;
@@ -595,10 +1046,23 @@ extern "C" void app_main(void)
 
     g_state_mutex = xSemaphoreCreateMutex();
     gpio_init_all();
+    oled_init();
+
+    // ---- SD Card ----
+    g_sd_ok = sd_init();
+    if (g_sd_ok)
+    {
+        ESP_LOGI(TAG, "SD card ready – access events will be logged to /sdcard/access_log.txt");
+    }
+    else
+    {
+        ESP_LOGW(TAG, "SD card not available – continuing without file logging");
+    }
 
     xTaskCreate(access_button_task, "access", 4096, NULL, 5, NULL);
     xTaskCreate(lighting_task, "lights", 4096, NULL, 4, NULL);
     xTaskCreate(serial_menu_task, "menu", 4096, NULL, 3, NULL);
+    xTaskCreate(display_task, "display", 4096, NULL, 3, NULL);
 
     ESP_LOGI(TAG, "System ready. Password: %s", MENU_PASSWORD);
 }

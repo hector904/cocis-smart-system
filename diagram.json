@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "author": "CoCIS Smart Control System - BSE III / CS II",
+  "author": "MADETE HECTOR - CoCIS",
   "editor": "wokwi",
   "parts": [
     {
@@ -11,131 +11,144 @@
       "attrs": {}
     },
     {
+      "type": "board-ssd1306",
+      "id": "oled1",
+      "top": -95,
+      "left": 280,
+      "attrs": { "i2cAddress": "0x3c" }
+    },
+    {
+      "type": "wokwi-microsd-card",
+      "id": "sd1",
+      "top": -80,
+      "left": 460,
+      "attrs": {}
+    },
+    {
       "type": "wokwi-servo",
       "id": "servo1",
-      "top": -40,
-      "left": 280,
-      "attrs": { "horn": "double" }
+      "top": 20,
+      "left": -210,
+      "attrs": {}
     },
     {
       "type": "wokwi-led",
-      "id": "led_green",
+      "id": "led-green",
       "top": 140,
-      "left": 280,
-      "attrs": { "color": "green" }
+      "left": -170,
+      "attrs": { "color": "green", "label": "Access OK" }
     },
     {
       "type": "wokwi-led",
-      "id": "led_red",
-      "top": 180,
-      "left": 280,
-      "attrs": { "color": "red" }
+      "id": "led-red",
+      "top": 200,
+      "left": -170,
+      "attrs": { "color": "red", "label": "Access Denied" }
     },
     {
       "type": "wokwi-led",
-      "id": "led_room1",
+      "id": "led-room1",
       "top": 140,
-      "left": 360,
-      "attrs": { "color": "yellow", "label": "Room1 Light" }
+      "left": 320,
+      "attrs": { "color": "yellow", "label": "Room 1" }
     },
     {
       "type": "wokwi-led",
-      "id": "led_room2",
-      "top": 180,
-      "left": 360,
-      "attrs": { "color": "orange", "label": "Room2 Light" }
+      "id": "led-room2",
+      "top": 200,
+      "left": 320,
+      "attrs": { "color": "yellow", "label": "Room 2" }
     },
     {
       "type": "wokwi-buzzer",
       "id": "buzzer1",
-      "top": 230,
-      "left": 280,
+      "top": 270,
+      "left": -190,
       "attrs": {}
     },
     {
       "type": "wokwi-pir-motion-sensor",
       "id": "pir1",
-      "top": -20,
-      "left": 420,
+      "top": 140,
+      "left": 450,
       "attrs": {}
     },
     {
       "type": "wokwi-pir-motion-sensor",
       "id": "pir2",
-      "top": 60,
-      "left": 420,
+      "top": 250,
+      "left": 450,
       "attrs": {}
     },
     {
       "type": "wokwi-pushbutton",
-      "id": "btn_entry_valid",
-      "top": 280,
-      "left": 0,
-      "attrs": { "color": "green", "label": "ENTRY VALID" }
+      "id": "btn-ok",
+      "top": 350,
+      "left": -150,
+      "attrs": { "color": "green", "label": "ENTRY OK" }
     },
     {
       "type": "wokwi-pushbutton",
-      "id": "btn_entry_invalid",
-      "top": 280,
-      "left": 100,
-      "attrs": { "color": "red", "label": "ENTRY INVALID" }
+      "id": "btn-bad",
+      "top": 410,
+      "left": -150,
+      "attrs": { "color": "red", "label": "ENTRY BAD" }
     },
     {
       "type": "wokwi-pushbutton",
-      "id": "btn_exit",
-      "top": 280,
-      "left": 200,
+      "id": "btn-exit",
+      "top": 470,
+      "left": -150,
       "attrs": { "color": "blue", "label": "EXIT" }
-    },
-    {
-      "type": "wokwi-text",
-      "id": "title",
-      "top": -80,
-      "left": 0,
-      "attrs": {
-        "text": "CoCIS Smart Control & Monitoring System\nESP-IDF | Entrance + 2 Lecture Rooms"
-      }
     }
   ],
   "connections": [
     [ "esp:TX", "$serialMonitor:RX", "", [] ],
     [ "esp:RX", "$serialMonitor:TX", "", [] ],
 
-    [ "esp:13", "servo1:PWM", "green", [ "h20", "v0" ] ],
-    [ "esp:GND.2", "servo1:GND", "black", [ "h0", "v20" ] ],
-    [ "esp:5V", "servo1:V+", "red", [ "h0", "v-20" ] ],
+    [ "oled1:VCC", "esp:3V3",   "red",   [] ],
+    [ "oled1:GND", "esp:GND.1", "black", [] ],
+    [ "oled1:SDA", "esp:23",    "blue",  ["h-20", "v80"] ],
+    [ "oled1:SCL", "esp:22",    "green", ["h-20", "v60"] ],
 
-    [ "esp:25", "led_green:A", "green", [ "h30", "v0" ] ],
-    [ "esp:GND.2", "led_green:C", "black", [ "h0", "v40" ] ],
+    [ "sd1:VCC", "esp:3V3",  "red",   [] ],
+    [ "sd1:GND", "esp:GND.1","black", [] ],
+    [ "sd1:CS",  "esp:5",    "orange",[] ],
+    [ "sd1:SCK", "esp:15",   "purple",[] ],
+    [ "sd1:DI",  "esp:16",   "blue",  [] ],
+    [ "sd1:DO",  "esp:17",   "green", [] ],
 
-    [ "esp:26", "led_red:A", "red", [ "h40", "v0" ] ],
-    [ "esp:GND.2", "led_red:C", "black", [ "h0", "v60" ] ],
+    [ "servo1:V+",  "esp:5V",   "red",   [] ],
+    [ "servo1:GND", "esp:GND.2","black", [] ],
+    [ "servo1:PWM", "esp:13",   "orange",[] ],
 
-    [ "esp:27", "led_room1:A", "yellow", [ "h50", "v0" ] ],
-    [ "esp:GND.2", "led_room1:C", "black", [ "h0", "v80" ] ],
+    [ "led-green:A", "esp:25",  "green", [] ],
+    [ "led-green:C", "esp:GND.3","black",[] ],
+    [ "led-red:A",   "esp:26",  "red",   [] ],
+    [ "led-red:C",   "esp:GND.3","black",[] ],
 
-    [ "esp:14", "led_room2:A", "orange", [ "h60", "v0" ] ],
-    [ "esp:GND.2", "led_room2:C", "black", [ "h0", "v100" ] ],
+    [ "led-room1:A", "esp:27",  "yellow",[] ],
+    [ "led-room1:C", "esp:GND.1","black",[] ],
+    [ "led-room2:A", "esp:14",  "yellow",[] ],
+    [ "led-room2:C", "esp:GND.1","black",[] ],
 
-    [ "esp:32", "buzzer1:1", "purple", [ "h20", "v0" ] ],
-    [ "esp:GND.2", "buzzer1:2", "black", [ "h0", "v120" ] ],
+    [ "buzzer1:1", "esp:32",    "orange",[] ],
+    [ "buzzer1:2", "esp:GND.2", "black", [] ],
 
-    [ "esp:34", "pir1:OUT", "blue", [ "h80", "v0" ] ],
-    [ "esp:3V3", "pir1:VCC", "red", [ "h0", "v-40" ] ],
-    [ "esp:GND.3", "pir1:GND", "black", [ "h0", "v-20" ] ],
+    [ "pir1:VCC", "esp:3V3",    "red",   [] ],
+    [ "pir1:GND", "esp:GND.1",  "black", [] ],
+    [ "pir1:OUT", "esp:34",     "green", [] ],
 
-    [ "esp:35", "pir2:OUT", "cyan", [ "h90", "v0" ] ],
-    [ "esp:3V3", "pir2:VCC", "red", [ "h0", "v-60" ] ],
-    [ "esp:GND.3", "pir2:GND", "black", [ "h0", "v-40" ] ],
+    [ "pir2:VCC", "esp:3V3",    "red",   [] ],
+    [ "pir2:GND", "esp:GND.1",  "black", [] ],
+    [ "pir2:OUT", "esp:35",     "green", [] ],
 
-    [ "esp:18", "btn_entry_valid:1.l", "green", [ "h0", "v20" ] ],
-    [ "esp:GND.1", "btn_entry_valid:2.l", "black", [ "h0", "v40" ] ],
-
-    [ "esp:19", "btn_entry_invalid:1.l", "red", [ "h0", "v20" ] ],
-    [ "esp:GND.1", "btn_entry_invalid:2.l", "black", [ "h0", "v40" ] ],
-
-    [ "esp:21", "btn_exit:1.l", "blue", [ "h0", "v20" ] ],
-    [ "esp:GND.1", "btn_exit:2.l", "black", [ "h0", "v40" ] ]
+    [ "btn-ok:1.r",   "esp:18",  "green", [] ],
+    [ "btn-ok:2.l",   "esp:GND.3","black",[] ],
+    [ "btn-bad:1.r",  "esp:19",  "red",   [] ],
+    [ "btn-bad:2.l",  "esp:GND.3","black",[] ],
+    [ "btn-exit:1.r", "esp:21",  "blue",  [] ],
+    [ "btn-exit:2.l", "esp:GND.3","black",[] ]
   ],
   "dependencies": {}
 }
