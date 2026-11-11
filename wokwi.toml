@@ -1,3 +1,6 @@
 [wokwi]
 firmware = ".pio/build/esp32dev/firmware.bin"
 elf = ".pio/build/esp32dev/firmware.elf"
+[[chip]]
+name = 'rfid-rc522'
+binary = 'chips/rfid-rc522.chip.wasm'

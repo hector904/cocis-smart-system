@@ -1,0 +1,15 @@
+{
+  "name": "RFID RC522",
+  "author": "CoCIS Smart Control",
+  "pins": [
+    "3V3",
+    "GND",
+    "SDA",
+    "SCK",
+    "MOSI",
+    "MISO",
+    "RST",
+    "CARD"
+  ],
+  "controls": []
+}
