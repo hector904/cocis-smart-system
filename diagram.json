@@ -29,14 +29,21 @@
     { "type": "wokwi-resistor", "id": "r_r2", "top": 370, "left": 430, "rotate": 90, "attrs": { "value": "330" } },
 
     { "type": "wokwi-pir-motion-sensor", "id": "pir1", "top": 280, "left": 560, "attrs": {} },
-    { "type": "wokwi-pir-motion-sensor", "id": "pir2", "top": 280, "left": 700, "attrs": {} }
+    { "type": "wokwi-pir-motion-sensor", "id": "pir2", "top": 280, "left": 700, "attrs": {} },
+
+    { "type": "wokwi-pushbutton", "id": "btn_ok", "top": 470, "left": 260, "attrs": { "color": "green", "label": "ENTRY OK" } },
+    { "type": "wokwi-pushbutton", "id": "btn_bad", "top": 470, "left": 380, "attrs": { "color": "red", "label": "ENTRY BAD" } },
+    { "type": "wokwi-pushbutton", "id": "btn_exit", "top": 470, "left": 500, "attrs": { "color": "blue", "label": "EXIT" } },
+
+    { "type": "wokwi-resistor", "id": "r_pu_ok", "top": 560, "left": 250, "rotate": 90, "attrs": { "value": "10000" } },
+    { "type": "wokwi-resistor", "id": "r_pu_bad", "top": 560, "left": 370, "rotate": 90, "attrs": { "value": "10000" } }
   ],
   "connections": [
     ["esp:TX", "$serialMonitor:RX", "", []],
     ["esp:RX", "$serialMonitor:TX", "", []],
 
-    ["esp:23", "oled:SDA", "green", []],
-    ["esp:22", "oled:SCL", "blue", []],
+    ["esp:22", "oled:SDA", "green", []],
+    ["esp:23", "oled:SCL", "blue", []],
     ["oled:VCC", "esp:3V3", "red", []],
     ["oled:GND", "esp:GND.1", "black", []],
 
@@ -99,7 +106,22 @@
 
     ["esp:35", "pir2:OUT", "green", []],
     ["pir2:VCC", "esp:5V", "red", []],
-    ["pir2:GND", "esp:GND.1", "black", []]
+    ["pir2:GND", "esp:GND.1", "black", []],
+
+    ["esp:VP", "btn_ok:1.l", "green", []],
+    ["btn_ok:2.l", "esp:GND.1", "black", []],
+    ["esp:VP", "r_pu_ok:2", "green", []],
+    ["r_pu_ok:1", "esp:3V3", "red", []],
+
+    ["esp:VN", "btn_bad:1.l", "red", []],
+    ["btn_bad:2.l", "esp:GND.1", "black", []],
+    ["esp:VN", "r_pu_bad:2", "red", []],
+    ["r_pu_bad:1", "esp:3V3", "red", []],
+
+    ["esp:0", "btn_exit:1.l", "blue", []],
+    ["btn_exit:2.l", "esp:GND.1", "black", []]
+
+    
   ],
   "dependencies": {}
 }

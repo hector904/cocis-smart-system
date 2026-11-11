@@ -58,33 +58,40 @@ static const char *TAG = "CoCIS";
 #define PIN_PIR1 ((gpio_num_t)34)
 #define PIN_PIR2 ((gpio_num_t)35)
 
-/* OLED I2C */
-#define PIN_OLED_SDA ((gpio_num_t)23)
-#define PIN_OLED_SCL ((gpio_num_t)22)
-#define OLED_I2C_ADDR 0x3C
-#define OLED_WIDTH 128
-#define OLED_HEIGHT 64
-
-/* microSD (SPI2 Host) */
+/* microSD & OLED Shared SPI2 Host */
 #define PIN_SD_CS ((gpio_num_t)5)
 #define PIN_SD_SCK ((gpio_num_t)15)
 #define PIN_SD_MOSI ((gpio_num_t)16)
 #define PIN_SD_MISO ((gpio_num_t)17)
 #define MOUNT_POINT "/sdcard"
 
+/* OLED is I2C (wokwi-ssd1306 has no SPI mode) */
+#define PIN_OLED_SDA ((gpio_num_t)22)
+#define PIN_OLED_SCL ((gpio_num_t)23)
+#define OLED_I2C_PORT I2C_NUM_0
+#define OLED_ADDR 0x3C
+#define OLED_WIDTH 128
+#define OLED_HEIGHT 64
+
 /* Both RFID RC522 readers share the SPI3 bus (SCK/MOSI/MISO); each has its own CS */
 #define PIN_RFID_SCK ((gpio_num_t)4)
 #define PIN_RFID_MOSI ((gpio_num_t)12)
 #define PIN_RFID_MISO ((gpio_num_t)33)
 
+/* Buttons: the last 3 free GPIOs after the shared-bus layout above.
+ * GPIO36/39 are input-only and have NO internal pull-up -> external 10k pull-ups to 3V3.
+ * GPIO0 has an internal pull-up (it is also the BOOT pin: do not hold it at reset). */
+#define PIN_BTN_ENTRY_OK ((gpio_num_t)36)
+#define PIN_BTN_ENTRY_BAD ((gpio_num_t)39)
+#define PIN_BTN_EXIT ((gpio_num_t)0)
+
 /* ===================== CONSTANTS ===================== */
+#define DEBOUNCE_MS 250
 #define DOOR_OPEN_MS 2500
 #define LIGHT_TIMEOUT_MS 8000
 #define MENU_PASSWORD "cocis2026"
 #define MAX_USERS 8
-#define UID_STR_LEN 24 /* up to 10 UID bytes as hex + NUL = 21 chars */
-#define I2C_MASTER_NUM I2C_NUM_0
-#define I2C_MASTER_FREQ_HZ 400000
+#define UID_STR_LEN 24
 
 /* ===================== STRUCTURES ===================== */
 typedef struct
@@ -112,7 +119,6 @@ typedef struct
     bool authenticated;
 } system_state_t;
 
-/* One physical door: its own servo (LEDC channel) and buzzer */
 typedef struct
 {
     const char *name;
@@ -121,7 +127,6 @@ typedef struct
     bool open;
 } door_t;
 
-/* One RC522 reader: its own chip select, all share SPI3 */
 typedef struct
 {
     const char *name;
@@ -137,6 +142,7 @@ static user_t g_users[MAX_USERS];
 static int g_user_count = 0;
 static time_t g_time_manual_offset_sec = 0;
 static bool g_sd_ok = false;
+static bool g_oled_ok = false;
 
 static door_t g_door_in = {"ENTRY", LEDC_CHANNEL_0, PIN_BUZZER_IN, false};
 static door_t g_door_out = {"EXIT", LEDC_CHANNEL_1, PIN_BUZZER_OUT, false};
@@ -210,11 +216,23 @@ static const uint8_t font5x7[][5] = {
     {0x61, 0x51, 0x49, 0x45, 0x43}, // Z
 };
 
-/* ===================== OLED DRIVER ===================== */
+/* ===================== OLED SPI DRIVER ===================== */
+static void oled_write(uint8_t control, const uint8_t *data, size_t len)
+{
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (OLED_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, control, true);
+    i2c_master_write(cmd, data, len, true);
+    i2c_master_stop(cmd);
+    i2c_master_cmd_begin(OLED_I2C_PORT, cmd, pdMS_TO_TICKS(100));
+    i2c_cmd_link_delete(cmd);
+}
+
 static esp_err_t oled_cmd(uint8_t cmd)
 {
-    uint8_t buf[2] = {0x00, cmd};
-    return i2c_master_write_to_device(I2C_MASTER_NUM, OLED_I2C_ADDR, buf, 2, pdMS_TO_TICKS(100));
+    oled_write(0x00, &cmd, 1);
+    return ESP_OK;
 }
 
 static void oled_clear(void)
@@ -263,20 +281,12 @@ static void oled_draw_string(int x, int y, const char *str)
 
 static void oled_update(void)
 {
-    oled_cmd(0x21);
-    oled_cmd(0);
-    oled_cmd(127);
-    oled_cmd(0x22);
-    oled_cmd(0);
-    oled_cmd(7);
-
-    uint8_t buf[17];
-    buf[0] = 0x40;
-    for (int i = 0; i < (int)sizeof(g_oled_fb); i += 16)
-    {
-        memcpy(&buf[1], &g_oled_fb[i], 16);
-        i2c_master_write_to_device(I2C_MASTER_NUM, OLED_I2C_ADDR, buf, 17, pdMS_TO_TICKS(100));
-    }
+    if (!g_oled_ok)
+        return;
+    oled_cmd(0x21); oled_cmd(0); oled_cmd(127);
+    oled_cmd(0x22); oled_cmd(0); oled_cmd(7);
+    for (int page = 0; page < 8; page++)
+        oled_write(0x40, &g_oled_fb[page * OLED_WIDTH], OLED_WIDTH);
 }
 
 static void oled_init(void)
@@ -288,61 +298,32 @@ static void oled_init(void)
     conf.scl_io_num = PIN_OLED_SCL;
     conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
     conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.master.clk_speed = I2C_MASTER_FREQ_HZ;
+    conf.master.clk_speed = 400000;
 
-    ESP_ERROR_CHECK(i2c_param_config(I2C_MASTER_NUM, &conf));
-    ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0));
+    if (i2c_param_config(OLED_I2C_PORT, &conf) != ESP_OK ||
+        i2c_driver_install(OLED_I2C_PORT, I2C_MODE_MASTER, 0, 0, 0) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "OLED I2C init failed");
+        return;
+    }
+    g_oled_ok = true;
 
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    oled_cmd(0xAE);
-    oled_cmd(0xD5);
-    oled_cmd(0x80);
-    oled_cmd(0xA8);
-    oled_cmd(0x3F);
-    oled_cmd(0xD3);
-    oled_cmd(0x00);
-    oled_cmd(0x40);
-    oled_cmd(0x8D);
-    oled_cmd(0x14);
-    oled_cmd(0x20);
-    oled_cmd(0x00);
-    oled_cmd(0xA1);
-    oled_cmd(0xC8);
-    oled_cmd(0xDA);
-    oled_cmd(0x12);
-    oled_cmd(0x81);
-    oled_cmd(0xCF);
-    oled_cmd(0xD9);
-    oled_cmd(0xF1);
-    oled_cmd(0xDB);
-    oled_cmd(0x40);
-    oled_cmd(0xA4);
-    oled_cmd(0xA6);
-    oled_cmd(0xAF);
+    static const uint8_t init_seq[] = {
+        0xAE, 0xD5, 0x80, 0xA8, 0x3F, 0xD3, 0x00, 0x40, 0x8D, 0x14,
+        0x20, 0x00, 0xA1, 0xC8, 0xDA, 0x12, 0x81, 0xCF, 0xD9, 0xF1,
+        0xDB, 0x40, 0xA4, 0xA6, 0xAF};
+    for (size_t i = 0; i < sizeof(init_seq); i++)
+        oled_cmd(init_seq[i]);
 
     oled_clear();
     oled_update();
-    ESP_LOGI(TAG, "OLED initialized (SDA=%d SCL=%d)", PIN_OLED_SDA, PIN_OLED_SCL);
+    ESP_LOGI(TAG, "OLED initialized via I2C (SDA=%d, SCL=%d, addr=0x%02X)",
+             PIN_OLED_SDA, PIN_OLED_SCL, OLED_ADDR);
 }
 
-/* ===================== RFID RC522 DRIVER (two readers, shared SPI3 bus) =====================
- *
- * Follows the real MFRC522 protocol:
- *  - SPI reads are 2-byte transfers (address, then a dummy byte that clocks
- *    the value out), so the result is in the second received byte.
- *  - Full ISO14443-A sequence: REQA -> anticollision -> SELECT -> HALT,
- *    with CRC_A calculated by the RC522 coprocessor.
- *  - Supports 4, 7 and 10 byte UIDs (cascade levels).
- *  - VersionReg is checked at start-up. If a reader does not answer
- *    (0x00 / 0xFF) its polling is disabled; cards can still be simulated
- *    from the serial menu (options 9 = entry, 10 = exit).
- *
- * Every function takes the reader it should talk to, so the entry and exit
- * readers are completely independent (own chip select, own task).
- */
-
-/* Registers */
+/* ===================== RFID RC522 DRIVER (SPI3) ===================== */
 #define RC_CommandReg 0x01
 #define RC_ComIrqReg 0x04
 #define RC_DivIrqReg 0x05
@@ -363,13 +344,11 @@ static void oled_init(void)
 #define RC_TReloadRegL 0x2D
 #define RC_VersionReg 0x37
 
-/* Commands */
 #define RC_CMD_IDLE 0x00
 #define RC_CMD_CALCCRC 0x03
 #define RC_CMD_TRANSCEIVE 0x0C
 #define RC_CMD_SOFTRESET 0x0F
 
-/* Transceive status */
 #define RC_OK 0
 #define RC_TIMEOUT 1
 #define RC_ERROR 2
@@ -414,12 +393,11 @@ static void rc_antenna_on(rfid_reader_t *rd)
         rc_set_bitmask(rd, RC_TxControlReg, 0x03);
 }
 
-/* CRC_A using the RC522 coprocessor. Result is written to crc[0] (low), crc[1] (high). */
 static bool rc_calc_crc(rfid_reader_t *rd, const uint8_t *data, uint8_t len, uint8_t *crc)
 {
     rc_write(rd, RC_CommandReg, RC_CMD_IDLE);
-    rc_write(rd, RC_DivIrqReg, 0x04);    /* clear CRCIRq */
-    rc_write(rd, RC_FIFOLevelReg, 0x80); /* flush FIFO */
+    rc_write(rd, RC_DivIrqReg, 0x04);
+    rc_write(rd, RC_FIFOLevelReg, 0x80);
     for (uint8_t i = 0; i < len; i++)
         rc_write(rd, RC_FIFODataReg, data[i]);
     rc_write(rd, RC_CommandReg, RC_CMD_CALCCRC);
@@ -439,30 +417,29 @@ static bool rc_calc_crc(rfid_reader_t *rd, const uint8_t *data, uint8_t len, uin
     return false;
 }
 
-/* Send bytes to a card and collect the answer. tx_last_bits = valid bits in the last tx byte (0 = all 8). */
 static int rc_transceive(rfid_reader_t *rd, const uint8_t *send, uint8_t send_len,
                          uint8_t *recv, uint8_t *recv_len, uint8_t tx_last_bits)
 {
     rc_write(rd, RC_CommandReg, RC_CMD_IDLE);
-    rc_write(rd, RC_ComIrqReg, 0x7F);    /* clear all IRQ flags */
-    rc_write(rd, RC_FIFOLevelReg, 0x80); /* flush FIFO */
+    rc_write(rd, RC_ComIrqReg, 0x7F);
+    rc_write(rd, RC_FIFOLevelReg, 0x80);
     for (uint8_t i = 0; i < send_len; i++)
         rc_write(rd, RC_FIFODataReg, send[i]);
     rc_write(rd, RC_BitFramingReg, tx_last_bits & 0x07);
     rc_write(rd, RC_CommandReg, RC_CMD_TRANSCEIVE);
-    rc_set_bitmask(rd, RC_BitFramingReg, 0x80); /* StartSend */
+    rc_set_bitmask(rd, RC_BitFramingReg, 0x80);
 
     int i;
     bool done = false;
     for (i = 0; i < 150; i++)
     {
         uint8_t irq = rc_read(rd, RC_ComIrqReg);
-        if (irq & 0x30) /* RxIRq or IdleIRq */
+        if (irq & 0x30)
         {
             done = true;
             break;
         }
-        if (irq & 0x01) /* TimerIRq: no answer from card */
+        if (irq & 0x01)
             break;
         esp_rom_delay_us(200);
     }
@@ -471,7 +448,7 @@ static int rc_transceive(rfid_reader_t *rd, const uint8_t *send, uint8_t send_le
         return RC_TIMEOUT;
 
     uint8_t err = rc_read(rd, RC_ErrorReg);
-    if (err & 0x13) /* BufferOvfl | ParityErr | ProtocolErr */
+    if (err & 0x13)
         return RC_ERROR;
 
     uint8_t n = rc_read(rd, RC_FIFOLevelReg);
@@ -483,15 +460,14 @@ static int rc_transceive(rfid_reader_t *rd, const uint8_t *send, uint8_t send_le
             recv[k] = rc_read(rd, RC_FIFODataReg);
         *recv_len = n;
     }
-    if (err & 0x08) /* CollErr */
+    if (err & 0x08)
         return RC_COLLISION;
     return RC_OK;
 }
 
-/* REQA: is there a card in the field? */
 static bool rc_request(rfid_reader_t *rd)
 {
-    rc_clear_bitmask(rd, RC_CollReg, 0x80); /* all received bits are cleared after a collision */
+    rc_clear_bitmask(rd, RC_CollReg, 0x80);
     uint8_t cmd = 0x26;
     uint8_t atqa[2];
     uint8_t len = sizeof(atqa);
@@ -499,7 +475,6 @@ static bool rc_request(rfid_reader_t *rd)
     return (s == RC_OK && len == 2);
 }
 
-/* Anticollision + SELECT, with cascade levels for 7/10 byte UIDs. */
 static bool rc_read_uid(rfid_reader_t *rd, uint8_t *uid, uint8_t *uid_len)
 {
     static const uint8_t sel_cmd[3] = {0x93, 0x95, 0x97};
@@ -525,7 +500,7 @@ static bool rc_read_uid(rfid_reader_t *rd, uint8_t *uid, uint8_t *uid_len)
         if (rc_transceive(rd, sel, 9, sak, &sak_len, 0) != RC_OK || sak_len != 3)
             return false;
 
-        if (sak[0] & 0x04) /* cascade bit: UID not complete, buf[0] is the 0x88 cascade tag */
+        if (sak[0] & 0x04)
         {
             memcpy(&uid[n], &buf[1], 3);
             n += 3;
@@ -539,15 +514,13 @@ static bool rc_read_uid(rfid_reader_t *rd, uint8_t *uid, uint8_t *uid_len)
     return false;
 }
 
-/* Put the selected card to sleep so it is not read again until it leaves the field. */
 static void rc_halt(rfid_reader_t *rd)
 {
     uint8_t hlt[4] = {0x50, 0x00, 0, 0};
     if (rc_calc_crc(rd, hlt, 2, &hlt[2]))
-        rc_transceive(rd, hlt, 4, NULL, NULL, 0); /* a card never answers HLTA; timeout is expected */
+        rc_transceive(rd, hlt, 4, NULL, NULL, 0);
 }
 
-/* Initialise the shared SPI3 bus once for both readers */
 static bool rfid_bus_init(void)
 {
     spi_bus_config_t buscfg;
@@ -568,7 +541,6 @@ static bool rfid_bus_init(void)
     return true;
 }
 
-/* Attach one RC522 (its own CS) to the shared bus and bring it up */
 static bool rfid_reader_init(rfid_reader_t *rd)
 {
     spi_device_interface_config_t devcfg;
@@ -587,7 +559,6 @@ static bool rfid_reader_init(rfid_reader_t *rd)
 
     vTaskDelay(pdMS_TO_TICKS(50));
 
-    /* Soft reset, then wait for the PowerDown bit to clear */
     rc_write(rd, RC_CommandReg, RC_CMD_SOFTRESET);
     for (int i = 0; i < 50; i++)
     {
@@ -596,30 +567,25 @@ static bool rfid_reader_init(rfid_reader_t *rd)
             break;
     }
 
-    /* Is a reader really there? A missing reader reads 0x00 or 0xFF */
     uint8_t ver = rc_read(rd, RC_VersionReg);
     if (ver == 0x00 || ver == 0xFF)
     {
-        ESP_LOGW(TAG, "RFID %s: RC522 not detected (VersionReg=0x%02X). Card polling disabled; "
-                      "use the serial menu to simulate a card.",
-                 rd->name, ver);
+        ESP_LOGW(TAG, "RFID %s: RC522 not detected (VersionReg=0x%02X)", rd->name, ver);
         return false;
     }
 
-    /* Timer: auto-start, ~25 ms timeout */
     rc_write(rd, RC_TModeReg, 0x80);
     rc_write(rd, RC_TPrescalerReg, 0xA9);
     rc_write(rd, RC_TReloadRegH, 0x03);
     rc_write(rd, RC_TReloadRegL, 0xE8);
-    rc_write(rd, RC_TxASKReg, 0x40); /* 100% ASK modulation */
-    rc_write(rd, RC_ModeReg, 0x3D);  /* CRC preset 0x6363 */
+    rc_write(rd, RC_TxASKReg, 0x40);
+    rc_write(rd, RC_ModeReg, 0x3D);
     rc_antenna_on(rd);
 
     ESP_LOGI(TAG, "RFID %s: RC522 ready on SPI3, CS=%d (VersionReg=0x%02X)", rd->name, rd->cs, ver);
     return true;
 }
 
-/* Returns true and fills uid_str (upper-case hex) when a new card was read. */
 static bool rfid_check_card(rfid_reader_t *rd, char *uid_str, size_t cap)
 {
     if (!rc_request(rd))
@@ -656,7 +622,7 @@ static bool sd_init(void)
     ret = spi_bus_initialize(SPI2_HOST, &bus_cfg, SDSPI_DEFAULT_DMA);
     if (ret != ESP_OK)
     {
-        ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "SPI2 bus init failed: %s", esp_err_to_name(ret));
         return false;
     }
 
@@ -744,22 +710,39 @@ static void obtain_time(void)
     struct tm timeinfo;
     memset(&timeinfo, 0, sizeof(timeinfo));
     int retry = 0;
-    const int retry_count = 15;
+    const int retry_count = 10;
 
     while (timeinfo.tm_year < (2025 - 1900) && ++retry < retry_count)
     {
         ESP_LOGI(TAG, "Waiting for time... (%d/%d)", retry, retry_count);
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        vTaskDelay(pdMS_TO_TICKS(1000));
         time(&now);
         localtime_r(&now, &timeinfo);
     }
 
+    // Fallback for offline simulation environment where NTP is blocked
+    if (timeinfo.tm_year < (2025 - 1900))
+    {
+        ESP_LOGW(TAG, "NTP sync timed out (offline simulation). Initializing realistic start time.");
+        struct tm default_time = {
+            .tm_year = 2026 - 1900,
+            .tm_mon = 10,  // November (0-indexed)
+            .tm_mday = 11,
+            .tm_hour = 20, // 8:00 PM realistic start
+            .tm_min = 11,
+            .tm_sec = 0
+        };
+        time_t t = mktime(&default_time);
+        struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
+        settimeofday(&tv, NULL);
+    }
+
     setenv("TZ", "UTC-3", 1);
     tzset();
-    ESP_LOGI(TAG, "Time synchronized");
+    ESP_LOGI(TAG, "Time synchronized / initialized");
 }
 
-/* ===================== TIME ===================== */
+/* ===================== TIME & SCHEDULE ===================== */
 static void get_current_time(int *hour, int *min, int *sec)
 {
     time_t now;
@@ -827,7 +810,6 @@ static void servo_set_angle(ledc_channel_t channel, int angle)
     ledc_update_duty(LEDC_LOW_SPEED_MODE, channel);
 }
 
-/* Opens one door (own servo + own buzzer), holds it, closes it again */
 static void door_open(door_t *d)
 {
     servo_set_angle(d->channel, 90);
@@ -851,7 +833,6 @@ static void door_open(door_t *d)
     xSemaphoreGive(g_state_mutex);
 }
 
-/* Denied beeps come from the buzzer of the door that was used */
 static void access_denied(door_t *d)
 {
     gpio_set_level(PIN_LED_RED, 1);
@@ -886,11 +867,6 @@ static void log_event(const char *uid, const char *dir, const char *result)
             fprintf(f, "%02d:%02d:%02d,UID=%s,%s,%s,occ=%d\n",
                     h, m, s, uid, dir, result, occ);
             fclose(f);
-            ESP_LOGI(TAG, "Event written to SD card");
-        }
-        else
-        {
-            ESP_LOGW(TAG, "Failed to open access_log.txt on SD");
         }
     }
 }
@@ -998,18 +974,15 @@ static void process_exit(const char *uid, bool valid_card)
     door_open(&g_door_out);
 }
 
-/* Shared by the real RC522 readers and the simulated scans from the serial menu */
 static void handle_rfid_entry(const char *uid)
 {
     bool registered = is_registered(uid);
-    ESP_LOGI(TAG, "ENTRY reader: card UID=%s (%s)", uid, registered ? "registered" : "unknown");
     process_entry(uid, registered);
 }
 
 static void handle_rfid_exit(const char *uid)
 {
     bool registered = is_registered(uid);
-    ESP_LOGI(TAG, "EXIT reader: card UID=%s (%s)", uid, registered ? "registered" : "unknown");
     process_exit(uid, registered);
 }
 
@@ -1061,9 +1034,7 @@ static void display_task(void *arg)
     }
 }
 
-/* ===================== RFID TASKS (one per reader) ===================== */
-/* The task argument is the reader it polls. The entry reader opens the entry
- * door, the exit reader opens the exit door; they never block each other. */
+/* ===================== RFID TASKS ===================== */
 static void rfid_task(void *arg)
 {
     rfid_reader_t *rd = (rfid_reader_t *)arg;
@@ -1079,6 +1050,44 @@ static void rfid_task(void *arg)
             else
                 handle_rfid_exit(uid);
             vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+/* ===================== BUTTON TASK ===================== */
+/* Pushbuttons (active low) that simulate card taps:
+ *   ENTRY_OK  -> registered card A1B2C3D4 at the entry door
+ *   ENTRY_BAD -> unknown card DEADBEEF at the entry door
+ *   EXIT      -> registered card A1B2C3D4 at the exit door */
+static void button_task(void *arg)
+{
+    bool last[3] = {false, false, false};
+    TickType_t last_press[3] = {0, 0, 0};
+
+    while (1)
+    {
+        bool cur[3] = {
+            gpio_get_level(PIN_BTN_ENTRY_OK) == 0,
+            gpio_get_level(PIN_BTN_ENTRY_BAD) == 0,
+            gpio_get_level(PIN_BTN_EXIT) == 0,
+        };
+        TickType_t now = xTaskGetTickCount();
+
+        for (int i = 0; i < 3; i++)
+        {
+            if (cur[i] && !last[i] && (now - last_press[i] > pdMS_TO_TICKS(DEBOUNCE_MS)))
+            {
+                last_press[i] = now;
+                if (i == 0)
+                    process_entry("A1B2C3D4", true);
+                else if (i == 1)
+                    process_entry("DEADBEEF", false);
+                else
+                    process_exit("A1B2C3D4", true);
+                now = xTaskGetTickCount();
+            }
+            last[i] = cur[i];
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -1104,7 +1113,6 @@ static void lighting_task(void *arg)
             {
                 g_state.room1_light = true;
                 gpio_set_level(PIN_LED_ROOM1, 1);
-                ESP_LOGI(TAG, "Room 1 lights ON");
             }
         }
         else if (g_state.room1_light && (now - last_motion1 > LIGHT_TIMEOUT_MS))
@@ -1112,7 +1120,6 @@ static void lighting_task(void *arg)
             g_state.room1_occupied = false;
             g_state.room1_light = false;
             gpio_set_level(PIN_LED_ROOM1, 0);
-            ESP_LOGI(TAG, "Room 1 lights OFF");
         }
 
         if (pir2)
@@ -1123,7 +1130,6 @@ static void lighting_task(void *arg)
             {
                 g_state.room2_light = true;
                 gpio_set_level(PIN_LED_ROOM2, 1);
-                ESP_LOGI(TAG, "Room 2 lights ON");
             }
         }
         else if (g_state.room2_light && (now - last_motion2 > LIGHT_TIMEOUT_MS))
@@ -1131,7 +1137,6 @@ static void lighting_task(void *arg)
             g_state.room2_occupied = false;
             g_state.room2_light = false;
             gpio_set_level(PIN_LED_ROOM2, 0);
-            ESP_LOGI(TAG, "Room 2 lights OFF");
         }
 
         xSemaphoreGive(g_state_mutex);
@@ -1151,8 +1156,8 @@ static void print_menu(void)
     printf("6. Force Room2 light ON/OFF\n");
     printf("7. Advance demo time (+1 hour)\n");
     printf("8. System status\n");
-    printf("9. Simulate ENTRY card scan (type a UID)\n");
-    printf("10. Simulate EXIT card scan (type a UID)\n");
+    printf("9. Simulate ENTRY card scan\n");
+    printf("10. Simulate EXIT card scan\n");
     printf("0. Logout\n");
     printf("===========================================\n");
     printf("Choice: ");
@@ -1163,11 +1168,10 @@ static void serial_menu_task(void *arg)
 {
     char line[64];
     int idx = 0;
-    int awaiting_uid = 0; /* 0 = no, 1 = entry scan, 2 = exit scan */
+    int awaiting_uid = 0;
 
     printf("\n\n*** CoCIS Smart Control System ***\n");
-    printf("Type password to login.\n");
-    printf("Default password: %s\n\nPassword: ", MENU_PASSWORD);
+    printf("Password: ");
     fflush(stdout);
 
     while (1)
@@ -1183,6 +1187,11 @@ static void serial_menu_task(void *arg)
         {
             line[idx] = 0;
             idx = 0;
+
+            if (strlen(line) == 0)
+            {
+                continue;
+            }
 
             if (!g_state.authenticated)
             {
@@ -1207,24 +1216,12 @@ static void serial_menu_task(void *arg)
                 for (char *p = line; *p; p++)
                     *p = (char)toupper((unsigned char)*p);
 
-                size_t n = strlen(line);
-                if (n == 0)
+                if (strlen(line) > 0 && strlen(line) < UID_STR_LEN)
                 {
-                    printf("Cancelled.\n");
-                }
-                else if (n >= UID_STR_LEN)
-                {
-                    printf("UID too long (max %d hex chars).\n", UID_STR_LEN - 1);
-                }
-                else if (which == 1)
-                {
-                    printf("\nSimulated ENTRY scan: %s\n", line);
-                    handle_rfid_entry(line);
-                }
-                else
-                {
-                    printf("\nSimulated EXIT scan: %s\n", line);
-                    handle_rfid_exit(line);
+                    if (which == 1)
+                        handle_rfid_entry(line);
+                    else
+                        handle_rfid_exit(line);
                 }
                 print_menu();
                 continue;
@@ -1239,8 +1236,9 @@ static void serial_menu_task(void *arg)
             else if (strcmp(line, "1") == 0)
             {
                 xSemaphoreTake(g_state_mutex, portMAX_DELAY);
-                printf("Building occupancy: %ld people\n", (long)g_state.occupancy);
+                printf("Building occupancy: %ld\n", (long)g_state.occupancy);
                 xSemaphoreGive(g_state_mutex);
+                fflush(stdout);
                 print_menu();
             }
             else if (strcmp(line, "2") == 0)
@@ -1253,6 +1251,7 @@ static void serial_menu_task(void *arg)
                        g_state.room2_occupied ? "YES" : "NO",
                        g_state.room2_light ? "ON" : "OFF");
                 xSemaphoreGive(g_state_mutex);
+                fflush(stdout);
                 print_menu();
             }
             else if (strcmp(line, "3") == 0)
@@ -1264,6 +1263,7 @@ static void serial_menu_task(void *arg)
                        g_state.schedule.start_hour, g_state.schedule.start_min,
                        g_state.schedule.end_hour, g_state.schedule.end_min);
                 printf("Within schedule: %s\n", is_within_schedule() ? "YES" : "NO");
+                fflush(stdout);
                 print_menu();
             }
             else if (strcmp(line, "4") == 0)
@@ -1274,6 +1274,7 @@ static void serial_menu_task(void *arg)
                 g_state.schedule.end_min = 0;
                 save_schedule_to_nvs();
                 printf("Schedule set to 07:00 - 19:00\n");
+                fflush(stdout);
                 print_menu();
             }
             else if (strcmp(line, "5") == 0)
@@ -1283,6 +1284,7 @@ static void serial_menu_task(void *arg)
                 gpio_set_level(PIN_LED_ROOM1, g_state.room1_light ? 1 : 0);
                 printf("Room 1 light forced %s\n", g_state.room1_light ? "ON" : "OFF");
                 xSemaphoreGive(g_state_mutex);
+                fflush(stdout);
                 print_menu();
             }
             else if (strcmp(line, "6") == 0)
@@ -1292,6 +1294,7 @@ static void serial_menu_task(void *arg)
                 gpio_set_level(PIN_LED_ROOM2, g_state.room2_light ? 1 : 0);
                 printf("Room 2 light forced %s\n", g_state.room2_light ? "ON" : "OFF");
                 xSemaphoreGive(g_state_mutex);
+                fflush(stdout);
                 print_menu();
             }
             else if (strcmp(line, "7") == 0)
@@ -1300,6 +1303,7 @@ static void serial_menu_task(void *arg)
                 int h, m, s;
                 get_current_time(&h, &m, &s);
                 printf("Time advanced -> now %02d:%02d:%02d\n", h, m, s);
+                fflush(stdout);
                 print_menu();
             }
             else if (strcmp(line, "8") == 0)
@@ -1307,31 +1311,27 @@ static void serial_menu_task(void *arg)
                 xSemaphoreTake(g_state_mutex, portMAX_DELAY);
                 printf("--- System Status ---\n");
                 printf("Occupancy    : %ld\n", (long)g_state.occupancy);
-                printf("Entry door   : %s\n", g_door_in.open ? "OPEN" : "CLOSED");
-                printf("Exit door    : %s\n", g_door_out.open ? "OPEN" : "CLOSED");
-                printf("Schedule OK  : %s\n", is_within_schedule() ? "YES" : "NO");
                 printf("SD Card      : %s\n", g_sd_ok ? "OK" : "FAIL");
                 printf("Entry reader : %s\n", g_rfid_in.ok ? "OK" : "NOT DETECTED");
                 printf("Exit reader  : %s\n", g_rfid_out.ok ? "OK" : "NOT DETECTED");
-                printf("Free heap    : %lu\n", (unsigned long)esp_get_free_heap_size());
                 xSemaphoreGive(g_state_mutex);
+                fflush(stdout);
                 print_menu();
             }
             else if (strcmp(line, "9") == 0)
             {
                 awaiting_uid = 1;
-                printf("ENTRY scan - enter card UID in hex (registered demo card: A1B2C3D4), empty = cancel: ");
+                printf("ENTRY scan UID: ");
                 fflush(stdout);
             }
             else if (strcmp(line, "10") == 0)
             {
                 awaiting_uid = 2;
-                printf("EXIT scan - enter card UID in hex (registered demo card: A1B2C3D4), empty = cancel: ");
+                printf("EXIT scan UID: ");
                 fflush(stdout);
             }
             else
             {
-                printf("Unknown command\n");
                 print_menu();
             }
         }
@@ -1347,36 +1347,50 @@ static void serial_menu_task(void *arg)
 /* ===================== INIT ===================== */
 static void gpio_init_all(void)
 {
-    gpio_config_t out;
-    memset(&out, 0, sizeof(out));
-    out.pin_bit_mask = (1ULL << PIN_LED_GREEN) | (1ULL << PIN_LED_RED) |
-                       (1ULL << PIN_LED_ROOM1) | (1ULL << PIN_LED_ROOM2) |
-                       (1ULL << PIN_BUZZER_IN) | (1ULL << PIN_BUZZER_OUT);
-    out.mode = GPIO_MODE_OUTPUT;
+    gpio_config_t out = {
+        .pin_bit_mask = (1ULL << PIN_LED_GREEN) | (1ULL << PIN_LED_RED) |
+                        (1ULL << PIN_LED_ROOM1) | (1ULL << PIN_LED_ROOM2) |
+                        (1ULL << PIN_BUZZER_IN) | (1ULL << PIN_BUZZER_OUT),
+        .mode = GPIO_MODE_OUTPUT
+    };
     gpio_config(&out);
 
-    gpio_config_t pir;
-    memset(&pir, 0, sizeof(pir));
-    pir.pin_bit_mask = (1ULL << PIN_PIR1) | (1ULL << PIN_PIR2);
-    pir.mode = GPIO_MODE_INPUT;
+    gpio_config_t pir = {
+        .pin_bit_mask = (1ULL << PIN_PIR1) | (1ULL << PIN_PIR2),
+        .mode = GPIO_MODE_INPUT
+    };
     gpio_config(&pir);
 
-    /* One 50 Hz timer shared by both servos, one LEDC channel each */
-    ledc_timer_config_t tcfg;
-    memset(&tcfg, 0, sizeof(tcfg));
-    tcfg.speed_mode = LEDC_LOW_SPEED_MODE;
-    tcfg.duty_resolution = LEDC_TIMER_13_BIT;
-    tcfg.timer_num = LEDC_TIMER_0;
-    tcfg.freq_hz = 50;
-    tcfg.clk_cfg = LEDC_AUTO_CLK;
+    /* GPIO36/39: input-only, no internal pull-up (external 10k pull-ups in the diagram) */
+    gpio_config_t btn_ext = {
+        .pin_bit_mask = (1ULL << PIN_BTN_ENTRY_OK) | (1ULL << PIN_BTN_ENTRY_BAD),
+        .mode = GPIO_MODE_INPUT
+    };
+    gpio_config(&btn_ext);
+
+    /* GPIO0: internal pull-up */
+    gpio_config_t btn_int = {
+        .pin_bit_mask = (1ULL << PIN_BTN_EXIT),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE
+    };
+    gpio_config(&btn_int);
+
+    ledc_timer_config_t tcfg = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_13_BIT,
+        .timer_num = LEDC_TIMER_0,
+        .freq_hz = 50,
+        .clk_cfg = LEDC_AUTO_CLK
+    };
     ledc_timer_config(&tcfg);
 
-    ledc_channel_config_t ccfg;
-    memset(&ccfg, 0, sizeof(ccfg));
-    ccfg.speed_mode = LEDC_LOW_SPEED_MODE;
-    ccfg.timer_sel = LEDC_TIMER_0;
-    ccfg.duty = 0;
-    ccfg.hpoint = 0;
+    ledc_channel_config_t ccfg = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .timer_sel = LEDC_TIMER_0,
+        .duty = 0,
+        .hpoint = 0
+    };
 
     ccfg.gpio_num = PIN_SERVO_IN;
     ccfg.channel = g_door_in.channel;
@@ -1399,7 +1413,7 @@ static void init_users(void)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting CoCIS Smart Control System (entry + exit RFID)...");
+    ESP_LOGI(TAG, "Starting CoCIS Smart Control System...");
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
@@ -1424,30 +1438,22 @@ void app_main(void)
 
     g_state_mutex = xSemaphoreCreateMutex();
     gpio_init_all();
+
+    /* SD card & OLED initialized on shared SPI2 Host */
+    g_sd_ok = sd_init();
     oled_init();
 
-    /* SD card on SPI2 */
-    g_sd_ok = sd_init();
-    if (g_sd_ok)
-    {
-        ESP_LOGI(TAG, "SD card ready on SPI2 - access events will be logged");
-    }
-    else
-    {
-        ESP_LOGW(TAG, "SD card not available");
-    }
-
-    /* Both RC522 readers on SPI3 (shared SCK/MOSI/MISO, separate CS) */
+    /* Both RC522 readers on shared SPI3 Host */
     bool rfid_bus_ok = rfid_bus_init();
     g_rfid_in.ok = rfid_bus_ok && rfid_reader_init(&g_rfid_in);
     g_rfid_out.ok = rfid_bus_ok && rfid_reader_init(&g_rfid_out);
 
-    /* Only poll readers that were actually detected */
     if (g_rfid_in.ok)
         xTaskCreate(rfid_task, "rfid_in", 5120, &g_rfid_in, 5, NULL);
     if (g_rfid_out.ok)
         xTaskCreate(rfid_task, "rfid_out", 5120, &g_rfid_out, 5, NULL);
 
+    xTaskCreate(button_task, "buttons", 5120, NULL, 5, NULL);
     xTaskCreate(lighting_task, "lights", 4096, NULL, 4, NULL);
     xTaskCreate(serial_menu_task, "menu", 4096, NULL, 3, NULL);
     xTaskCreate(display_task, "display", 4096, NULL, 3, NULL);
