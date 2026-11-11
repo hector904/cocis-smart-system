@@ -1,53 +1,3 @@
-/******************************************************************************
- *  CoCIS Smart Control and Monitoring System (SCMS)
- *  Terminal  : MAIN BUILDING CONTROLLER
- *  Target    : ESP32 DevKit, ESP-IDF, Wokwi simulator
- *  Author    : MADETE HECTOR  24/U/25933/EVE  2400725933
- ******************************************************************************
- *This project presents a practical, implementable design and simulation of a Smart Control and Monitoring System that addresses access control, occupancy tracking, intelligent lighting, data logging, configurable schedules and multi-device coordination using ESP32 microcontrollers on the Wokwi platform with ESP-IDF
- *
- * Responsibilities of this terminal
- *   - Access control at the main entrance (valid / invalid card simulation)
- *   - Door actuation via servo motor
- *   - Building occupancy counter (who is currently inside)
- *   - Configurable access schedule (start/end time), stored in NVS
- *   - Authenticated serial management console (password protected)
- *   - SD card storage for access event logging
- *   - Real-time clock via SNTP (NTP over Wi-Fi)
- *   - Status display on SSD1306 OLED (128×64)
- *   - Automatic room lighting control based on PIR motion sensors
- *
- *  Main features
- *   - Access granted only within the configured schedule
- *   - Simple anti-re-entry check (card already marked as inside is denied)
- *   - Failed access indication (red LED + buzzer pattern)
- *   - Successful access indication (green LED + short buzzer beep + door open)
- *   - Two independent rooms with PIR-triggered lights and timeout
- *   - Live status on OLED: time, occupancy, door state, room lights,
- *     schedule and SD-card health
- *   - All access events written to /sdcard/access_log.txt
- *
- *  Hardware used
- *   - Servo door                  → GPIO 13
- *   - Green LED (access granted)  → GPIO 25
- *   - Red LED (access denied)     → GPIO 26
- *   - Room 1 light                → GPIO 27
- *   - Room 2 light                → GPIO 14
- *   - Buzzer                      → GPIO 32
- *   - PIR sensor Room 1           → GPIO 34
- *   - PIR sensor Room 2           → GPIO 35
- *   - ENTRY OK button             → GPIO 18
- *   - ENTRY BAD button            → GPIO 19
- *   - EXIT button                 → GPIO 21
- *   - OLED SSD1306 (I2C)          → SDA=23, SCL=22
- *   - microSD card (SPI)          → CS=5, SCK=15, MOSI=16, MISO=17
- *
- *  In Wokwi the RFID reader is emulated:
- *   - “ENTRY OK” button simulates a valid registered card
- *   - “ENTRY BAD” button simulates an unregistered / invalid card
- *   - “EXIT” button simulates a card leaving the building
- *
- *****************************************************************************/
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -65,7 +15,7 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "driver/i2c.h"
-#include "driver/spi_common.h"
+#include "driver/spi_master.h"
 #include "driver/sdspi_host.h"
 #include "sdmmc_cmd.h"
 #include "esp_vfs_fat.h"
@@ -85,7 +35,7 @@ static const char *TAG = "CoCIS";
 #define WIFI_SSID "Wokwi-GUEST"
 #define WIFI_PASS ""
 
-/* ===================== PINS ===================== */
+/* ===================== PINS (NON-CONFLICTING) ===================== */
 #define PIN_SERVO ((gpio_num_t)13)
 #define PIN_LED_GREEN ((gpio_num_t)25)
 #define PIN_LED_RED ((gpio_num_t)26)
@@ -94,6 +44,8 @@ static const char *TAG = "CoCIS";
 #define PIN_BUZZER ((gpio_num_t)32)
 #define PIN_PIR1 ((gpio_num_t)34)
 #define PIN_PIR2 ((gpio_num_t)35)
+
+/* Buttons */
 #define PIN_BTN_ENTRY_OK ((gpio_num_t)18)
 #define PIN_BTN_ENTRY_BAD ((gpio_num_t)19)
 #define PIN_BTN_EXIT ((gpio_num_t)21)
@@ -105,12 +57,18 @@ static const char *TAG = "CoCIS";
 #define OLED_WIDTH 128
 #define OLED_HEIGHT 64
 
-/* microSD (SPI) */
+/* microSD (SPI2 Host) */
 #define PIN_SD_CS ((gpio_num_t)5)
 #define PIN_SD_SCK ((gpio_num_t)15)
 #define PIN_SD_MOSI ((gpio_num_t)16)
 #define PIN_SD_MISO ((gpio_num_t)17)
 #define MOUNT_POINT "/sdcard"
+
+/* RFID RC522 (SPI3 Host - Completely Separate Pins) */
+#define PIN_RFID_CS ((gpio_num_t)2)
+#define PIN_RFID_SCK ((gpio_num_t)4)
+#define PIN_RFID_MOSI ((gpio_num_t)12)
+#define PIN_RFID_MISO ((gpio_num_t)33)
 
 /* ===================== CONSTANTS ===================== */
 #define DOOR_OPEN_MS 2500
@@ -155,13 +113,14 @@ static user_t g_users[MAX_USERS];
 static int g_user_count = 0;
 static time_t g_time_manual_offset_sec = 0;
 static bool g_sd_ok = false;
+static spi_device_handle_t g_rfid_spi = NULL;
 
 /* OLED framebuffer */
 static uint8_t g_oled_fb[OLED_WIDTH * OLED_HEIGHT / 8];
 
 /* ===================== 5x7 FONT ===================== */
 static const uint8_t font5x7[][5] = {
-    {0x00, 0x00, 0x00, 0x00, 0x00}, //
+    {0x00, 0x00, 0x00, 0x00, 0x00}, // 
     {0x00, 0x00, 0x5F, 0x00, 0x00}, // !
     {0x00, 0x07, 0x00, 0x07, 0x00}, // "
     {0x14, 0x7F, 0x14, 0x7F, 0x14}, // #
@@ -338,12 +297,142 @@ static void oled_init(void)
     ESP_LOGI(TAG, "OLED initialized (SDA=%d SCL=%d)", PIN_OLED_SDA, PIN_OLED_SCL);
 }
 
-/* ===================== SD CARD ===================== */
+/* ===================== RFID RC522 DRIVER (SPI3 Host) ===================== */
+static uint8_t rfid_read_reg(uint8_t reg)
+{
+    uint8_t tx_data = ((reg << 1) & 0x7E) | 0x80;
+    uint8_t rx_data = 0;
+    spi_transaction_t t;
+    memset(&t, 0, sizeof(t));
+    t.length = 8;
+    t.tx_buffer = &tx_data;
+    t.rx_buffer = &rx_data;
+    spi_device_transmit(g_rfid_spi, &t);
+    return rx_data;
+}
+
+static void rfid_write_reg(uint8_t reg, uint8_t val)
+{
+    uint8_t tx_data[2] = { (uint8_t)((reg << 1) & 0x7E), val };
+    spi_transaction_t t;
+    memset(&t, 0, sizeof(t));
+    t.length = 16;
+    t.tx_buffer = tx_data;
+    spi_device_transmit(g_rfid_spi, &t);
+}
+
+static void rfid_set_bitmask(uint8_t reg, uint8_t mask)
+{
+    rfid_write_reg(reg, rfid_read_reg(reg) | mask);
+}
+
+static void rfid_antenna_on(void)
+{
+    uint8_t val = rfid_read_reg(0x14);
+    if (!(val & 0x03))
+    {
+        rfid_set_bitmask(0x14, 0x03);
+    }
+}
+
+static void rfid_init(void)
+{
+    spi_bus_config_t buscfg;
+    memset(&buscfg, 0, sizeof(buscfg));
+    buscfg.mosi_io_num = PIN_RFID_MOSI;
+    buscfg.miso_io_num = PIN_RFID_MISO;
+    buscfg.sclk_io_num = PIN_RFID_SCK;
+    buscfg.quadwp_io_num = -1;
+    buscfg.quadhd_io_num = -1;
+    buscfg.max_transfer_sz = 64;
+
+    spi_device_interface_config_t devcfg;
+    memset(&devcfg, 0, sizeof(devcfg));
+    devcfg.clock_speed_hz = 5000000;
+    devcfg.mode = 0;
+    devcfg.spics_io_num = PIN_RFID_CS;
+    devcfg.queue_size = 7;
+
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO));
+    ESP_ERROR_CHECK(spi_bus_add_device(SPI3_HOST, &devcfg, &g_rfid_spi));
+
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    rfid_write_reg(0x01, 0x0F);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    rfid_write_reg(0x2A, 0x8D);
+    rfid_write_reg(0x2B, 0x3E);
+    rfid_write_reg(0x2C, 0x30);
+    rfid_write_reg(0x2D, 0x00);
+    rfid_write_reg(0x15, 0x40);
+    rfid_write_reg(0x11, 0x3D);
+    rfid_antenna_on();
+    ESP_LOGI(TAG, "RFID RC522 initialized on SPI3");
+}
+
+static bool rfid_check_card(char *uid_str)
+{
+    uint8_t status;
+    uint8_t buffer[18];
+    uint8_t len;
+
+    rfid_write_reg(0x0E, 0x7F);
+    rfid_write_reg(0x09, 0x20);
+
+    buffer[0] = 0x26;
+    rfid_write_reg(0x0A, 1);
+    rfid_write_reg(0x09, buffer[0]);
+    rfid_write_reg(0x07, 0x0C);
+    rfid_set_bitmask(0x08, 0x80);
+
+    int wait = 200;
+    while (wait--)
+    {
+        status = rfid_read_reg(0x04);
+        if (status & 0x01) break;
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+
+    if (wait <= 0) return false;
+
+    rfid_write_reg(0x0E, 0x7F);
+    rfid_write_reg(0x09, 0x20);
+    buffer[0] = 0x93;
+    buffer[1] = 0x20;
+    rfid_write_reg(0x0A, 2);
+    for(int i = 0; i < 2; i++) rfid_write_reg(0x09, buffer[i]);
+    rfid_write_reg(0x07, 0x0C);
+    rfid_set_bitmask(0x08, 0x80);
+
+    wait = 200;
+    while (wait--)
+    {
+        status = rfid_read_reg(0x04);
+        if (status & 0x01) break;
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+
+    if (wait <= 0) return false;
+
+    len = rfid_read_reg(0x1A);
+    if (len < 5) return false;
+
+    uint8_t raw_uid[5];
+    for (int i = 0; i < 5; i++)
+    {
+        raw_uid[i] = rfid_read_reg(0x09);
+    }
+
+    snprintf(uid_str, 16, "%02X%02X%02X%02X", raw_uid[0], raw_uid[1], raw_uid[2], raw_uid[3]);
+    return true;
+}
+
+/* ===================== SD CARD (SPI2 Host) ===================== */
 static bool sd_init(void)
 {
     esp_err_t ret;
 
-    // SPI bus
     spi_bus_config_t bus_cfg;
     memset(&bus_cfg, 0, sizeof(bus_cfg));
     bus_cfg.mosi_io_num = PIN_SD_MOSI;
@@ -360,10 +449,9 @@ static bool sd_init(void)
         return false;
     }
 
-    // SD host
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = SPI2_HOST;
-    host.max_freq_khz = 10000; // safer for Wokwi
+    host.max_freq_khz = 10000;
 
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = PIN_SD_CS;
@@ -390,7 +478,7 @@ static bool sd_init(void)
 
 /* ===================== WIFI & NTP ===================== */
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
+                             int32_t event_id, void *event_data)
 {
     if (event_id == WIFI_EVENT_STA_START)
     {
@@ -574,11 +662,9 @@ static void log_event(const char *uid, const char *dir, const char *result)
     occ = g_state.occupancy;
     xSemaphoreGive(g_state_mutex);
 
-    // Always log to serial
     ESP_LOGI(TAG, "LOG %02d:%02d:%02d | UID=%s | %s | %s | occ=%d",
              h, m, s, uid, dir, result, occ);
 
-    // Also write to SD card
     if (g_sd_ok)
     {
         FILE *f = fopen(MOUNT_POINT "/access_log.txt", "a");
@@ -706,7 +792,6 @@ static void display_task(void *arg)
         snprintf(line, sizeof(line), "ACCESS:%s", sched ? "ALLOWED" : "DENIED");
         oled_draw_string(0, 50, line);
 
-        // SD status
         snprintf(line, sizeof(line), "SD:%s", g_sd_ok ? "OK" : "FAIL");
         oled_draw_string(90, 50, line);
 
@@ -715,7 +800,7 @@ static void display_task(void *arg)
     }
 }
 
-/* ===================== OTHER TASKS ===================== */
+/* ===================== ACCESS & RFID TASKS ===================== */
 static void access_button_task(void *arg)
 {
     bool last_ok = true, last_bad = true, last_exit = true;
@@ -744,10 +829,27 @@ static void access_button_task(void *arg)
             process_exit("A1B2C3D4");
         }
 
+        char rfid_uid[16];
+        if (rfid_check_card(rfid_uid))
+        {
+            ESP_LOGI(TAG, "RFID Card Scanned! UID: %s", rfid_uid);
+            bool registered = false;
+            for (int i = 0; i < g_user_count; i++)
+            {
+                if (strcmp(g_users[i].uid, rfid_uid) == 0)
+                {
+                    registered = true;
+                    break;
+                }
+            }
+            process_entry(rfid_uid, registered);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+
         last_ok = ok;
         last_bad = bad;
         last_exit = exitb;
-        vTaskDelay(pdMS_TO_TICKS(30));
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -988,7 +1090,6 @@ static void gpio_init_all(void)
     pir.mode = GPIO_MODE_INPUT;
     gpio_config(&pir);
 
-    // LEDC (servo)
     ledc_timer_config_t tcfg;
     memset(&tcfg, 0, sizeof(tcfg));
     tcfg.speed_mode = LEDC_LOW_SPEED_MODE;
@@ -1018,9 +1119,9 @@ static void init_users(void)
     g_user_count = 1;
 }
 
-extern "C" void app_main(void)
+void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting CoCIS Smart Control System...");
+    ESP_LOGI(TAG, "Starting CoCIS Smart Control System (Pure C) with separate SPI buses...");
 
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
@@ -1048,16 +1149,18 @@ extern "C" void app_main(void)
     gpio_init_all();
     oled_init();
 
-    // ---- SD Card ----
+    // Independent Peripherals Initialization
     g_sd_ok = sd_init();
     if (g_sd_ok)
     {
-        ESP_LOGI(TAG, "SD card ready – access events will be logged to /sdcard/access_log.txt");
+        ESP_LOGI(TAG, "SD card ready on SPI2 – access events will be logged");
     }
     else
     {
-        ESP_LOGW(TAG, "SD card not available – continuing without file logging");
+        ESP_LOGW(TAG, "SD card not available");
     }
+
+    rfid_init();
 
     xTaskCreate(access_button_task, "access", 4096, NULL, 5, NULL);
     xTaskCreate(lighting_task, "lights", 4096, NULL, 4, NULL);

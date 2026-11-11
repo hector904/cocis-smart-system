@@ -1,154 +1,153 @@
 {
   "version": 1,
-  "author": "MADETE HECTOR - CoCIS",
+  "author": "Hector Madete",
   "editor": "wokwi",
   "parts": [
-    {
-      "type": "board-esp32-devkit-c-v4",
-      "id": "esp",
-      "top": 0,
-      "left": 0,
-      "attrs": {}
-    },
+    { "type": "board-esp32-devkit-c-v4", "id": "esp", "top": 0, "left": 0, "attrs": {} },
     {
       "type": "board-ssd1306",
       "id": "oled1",
-      "top": -95,
-      "left": 280,
-      "attrs": { "i2cAddress": "0x3c" }
+      "top": -140,
+      "left": 180,
+      "attrs": { "oledHeight": "64" }
     },
     {
-      "type": "wokwi-microsd-card",
+      "type": "micro-sd-card",
       "id": "sd1",
-      "top": -80,
-      "left": 460,
+      "top": -40,
+      "left": 180,
       "attrs": {}
     },
     {
-      "type": "wokwi-servo",
-      "id": "servo1",
-      "top": 20,
-      "left": -210,
+      "type": "rfid-rc522",
+      "id": "rfid1",
+      "top": 120,
+      "left": 180,
       "attrs": {}
-    },
-    {
-      "type": "wokwi-led",
-      "id": "led-green",
-      "top": 140,
-      "left": -170,
-      "attrs": { "color": "green", "label": "Access OK" }
-    },
-    {
-      "type": "wokwi-led",
-      "id": "led-red",
-      "top": 200,
-      "left": -170,
-      "attrs": { "color": "red", "label": "Access Denied" }
-    },
-    {
-      "type": "wokwi-led",
-      "id": "led-room1",
-      "top": 140,
-      "left": 320,
-      "attrs": { "color": "yellow", "label": "Room 1" }
-    },
-    {
-      "type": "wokwi-led",
-      "id": "led-room2",
-      "top": 200,
-      "left": 320,
-      "attrs": { "color": "yellow", "label": "Room 2" }
     },
     {
       "type": "wokwi-buzzer",
-      "id": "buzzer1",
-      "top": 270,
-      "left": -190,
-      "attrs": {}
+      "id": "bz1",
+      "top": 40,
+      "left": 180,
+      "attrs": { "volume": "0.5" }
     },
     {
       "type": "wokwi-pir-motion-sensor",
       "id": "pir1",
-      "top": 140,
-      "left": 450,
+      "top": -160,
+      "left": -220,
       "attrs": {}
     },
     {
       "type": "wokwi-pir-motion-sensor",
       "id": "pir2",
-      "top": 250,
-      "left": 450,
+      "top": -80,
+      "left": -220,
       "attrs": {}
     },
     {
       "type": "wokwi-pushbutton",
-      "id": "btn-ok",
-      "top": 350,
-      "left": -150,
-      "attrs": { "color": "green", "label": "ENTRY OK" }
+      "id": "btnok",
+      "top": 20,
+      "left": -220,
+      "attrs": { "color": "green", "label": "Entry OK" }
     },
     {
       "type": "wokwi-pushbutton",
-      "id": "btn-bad",
-      "top": 410,
-      "left": -150,
-      "attrs": { "color": "red", "label": "ENTRY BAD" }
+      "id": "btnbad",
+      "top": 80,
+      "left": -220,
+      "attrs": { "color": "red", "label": "Entry Bad" }
     },
     {
       "type": "wokwi-pushbutton",
-      "id": "btn-exit",
-      "top": 470,
-      "left": -150,
-      "attrs": { "color": "blue", "label": "EXIT" }
+      "id": "btnexit",
+      "top": 140,
+      "left": -220,
+      "attrs": { "color": "blue", "label": "Exit" }
+    },
+    {
+      "type": "wokwi-servo",
+      "id": "servo1",
+      "top": 220,
+      "left": -160,
+      "attrs": { "horn": "default" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "ledgreen",
+      "top": 250,
+      "left": -40,
+      "attrs": { "color": "green" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "ledred",
+      "top": 250,
+      "left": 0,
+      "attrs": { "color": "red" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "ledr1",
+      "top": 250,
+      "left": 40,
+      "attrs": { "color": "yellow" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "ledr2",
+      "top": 250,
+      "left": 80,
+      "attrs": { "color": "blue" }
     }
   ],
   "connections": [
     [ "esp:TX", "$serialMonitor:RX", "", [] ],
     [ "esp:RX", "$serialMonitor:TX", "", [] ],
-
-    [ "oled1:VCC", "esp:3V3",   "red",   [] ],
-    [ "oled1:GND", "esp:GND.1", "black", [] ],
-    [ "oled1:SDA", "esp:23",    "blue",  ["h-20", "v80"] ],
-    [ "oled1:SCL", "esp:22",    "green", ["h-20", "v60"] ],
-
-    [ "sd1:VCC", "esp:3V3",  "red",   [] ],
-    [ "sd1:GND", "esp:GND.1","black", [] ],
-    [ "sd1:CS",  "esp:5",    "orange",[] ],
-    [ "sd1:SCK", "esp:15",   "purple",[] ],
-    [ "sd1:DI",  "esp:16",   "blue",  [] ],
-    [ "sd1:DO",  "esp:17",   "green", [] ],
-
-    [ "servo1:V+",  "esp:5V",   "red",   [] ],
-    [ "servo1:GND", "esp:GND.2","black", [] ],
-    [ "servo1:PWM", "esp:13",   "orange",[] ],
-
-    [ "led-green:A", "esp:25",  "green", [] ],
-    [ "led-green:C", "esp:GND.3","black",[] ],
-    [ "led-red:A",   "esp:26",  "red",   [] ],
-    [ "led-red:C",   "esp:GND.3","black",[] ],
-
-    [ "led-room1:A", "esp:27",  "yellow",[] ],
-    [ "led-room1:C", "esp:GND.1","black",[] ],
-    [ "led-room2:A", "esp:14",  "yellow",[] ],
-    [ "led-room2:C", "esp:GND.1","black",[] ],
-
-    [ "buzzer1:1", "esp:32",    "orange",[] ],
-    [ "buzzer1:2", "esp:GND.2", "black", [] ],
-
-    [ "pir1:VCC", "esp:3V3",    "red",   [] ],
-    [ "pir1:GND", "esp:GND.1",  "black", [] ],
-    [ "pir1:OUT", "esp:34",     "green", [] ],
-
-    [ "pir2:VCC", "esp:3V3",    "red",   [] ],
-    [ "pir2:GND", "esp:GND.1",  "black", [] ],
-    [ "pir2:OUT", "esp:35",     "green", [] ],
-
-    [ "btn-ok:1.r",   "esp:18",  "green", [] ],
-    [ "btn-ok:2.l",   "esp:GND.3","black",[] ],
-    [ "btn-bad:1.r",  "esp:19",  "red",   [] ],
-    [ "btn-bad:2.l",  "esp:GND.3","black",[] ],
-    [ "btn-exit:1.r", "esp:21",  "blue",  [] ],
-    [ "btn-exit:2.l", "esp:GND.3","black",[] ]
+    [ "oled1:GND", "esp:GND.1", "black", [ "v0" ] ],
+    [ "oled1:VCC", "esp:3V3", "red", [ "v0" ] ],
+    [ "oled1:SDA", "esp:23", "blue", [ "v0" ] ],
+    [ "oled1:SCL", "esp:22", "green", [ "v0" ] ],
+    [ "servo1:GND", "esp:GND.2", "black", [ "v0" ] ],
+    [ "servo1:VCC", "esp:5V", "red", [ "v0" ] ],
+    [ "servo1:PWM", "esp:13", "orange", [ "v0" ] ],
+    [ "ledgreen:A", "esp:25", "green", [ "v0" ] ],
+    [ "ledgreen:C", "esp:GND.2", "black", [ "v0" ] ],
+    [ "ledred:A", "esp:26", "red", [ "v0" ] ],
+    [ "ledred:C", "esp:GND.2", "black", [ "v0" ] ],
+    [ "ledr1:A", "esp:27", "yellow", [ "v0" ] ],
+    [ "ledr1:C", "esp:GND.2", "black", [ "v0" ] ],
+    [ "ledr2:A", "esp:14", "blue", [ "v0" ] ],
+    [ "ledr2:C", "esp:GND.2", "black", [ "v0" ] ],
+    [ "bz1:1", "esp:32", "purple", [ "v0" ] ],
+    [ "bz1:2", "esp:GND.2", "black", [ "v0" ] ],
+    [ "pir1:VCC", "esp:5V", "red", [ "v0" ] ],
+    [ "pir1:GND", "esp:GND.2", "black", [ "v0" ] ],
+    [ "pir1:OUT", "esp:34", "violet", [ "v0" ] ],
+    [ "pir2:VCC", "esp:5V", "red", [ "v0" ] ],
+    [ "pir2:GND", "esp:GND.2", "black", [ "v0" ] ],
+    [ "pir2:OUT", "esp:35", "violet", [ "v0" ] ],
+    [ "btnok:1.l", "esp:18", "green", [ "v0" ] ],
+    [ "btnok:2.l", "esp:GND.3", "black", [ "v0" ] ],
+    [ "btnbad:1.l", "esp:19", "red", [ "v0" ] ],
+    [ "btnbad:2.l", "esp:GND.3", "black", [ "v0" ] ],
+    [ "btnexit:1.l", "esp:21", "blue", [ "v0" ] ],
+    [ "btnexit:2.l", "esp:GND.3", "black", [ "v0" ] ],
+    [ "sd1:CS", "esp:5", "orange", [ "v0" ] ],
+    [ "sd1:SCK", "esp:15", "green", [ "v0" ] ],
+    [ "sd1:MOSI", "esp:16", "blue", [ "v0" ] ],
+    [ "sd1:MISO", "esp:17", "yellow", [ "v0" ] ],
+    [ "sd1:VCC", "esp:3V3", "red", [ "v0" ] ],
+    [ "sd1:GND", "esp:GND.3", "black", [ "v0" ] ],
+    [ "rfid1:RST", "esp:3V3", "orange", [ "v0" ] ],
+    [ "rfid1:SDA", "esp:2", "yellow", [ "v0" ] ],
+    [ "rfid1:SCK", "esp:4", "green", [ "v0" ] ],
+    [ "rfid1:MOSI", "esp:12", "blue", [ "v0" ] ],
+    [ "rfid1:MISO", "esp:33", "violet", [ "v0" ] ],
+    [ "rfid1:GND", "esp:GND.3", "black", [ "v0" ] ],
+    [ "rfid1:3.3V", "esp:3V3", "red", [ "v0" ] ]
   ],
   "dependencies": {}
 }
