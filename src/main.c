@@ -283,8 +283,12 @@ static void oled_update(void)
 {
     if (!g_oled_ok)
         return;
-    oled_cmd(0x21); oled_cmd(0); oled_cmd(127);
-    oled_cmd(0x22); oled_cmd(0); oled_cmd(7);
+    oled_cmd(0x21);
+    oled_cmd(0);
+    oled_cmd(127);
+    oled_cmd(0x22);
+    oled_cmd(0);
+    oled_cmd(7);
     for (int page = 0; page < 8; page++)
         oled_write(0x40, &g_oled_fb[page * OLED_WIDTH], OLED_WIDTH);
 }
@@ -726,14 +730,13 @@ static void obtain_time(void)
         ESP_LOGW(TAG, "NTP sync timed out (offline simulation). Initializing realistic start time.");
         struct tm default_time = {
             .tm_year = 2026 - 1900,
-            .tm_mon = 10,  // November (0-indexed)
+            .tm_mon = 10, // November (0-indexed)
             .tm_mday = 11,
             .tm_hour = 20, // 8:00 PM realistic start
             .tm_min = 11,
-            .tm_sec = 0
-        };
+            .tm_sec = 0};
         time_t t = mktime(&default_time);
-        struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
+        struct timeval tv = {.tv_sec = t, .tv_usec = 0};
         settimeofday(&tv, NULL);
     }
 
@@ -1351,29 +1354,25 @@ static void gpio_init_all(void)
         .pin_bit_mask = (1ULL << PIN_LED_GREEN) | (1ULL << PIN_LED_RED) |
                         (1ULL << PIN_LED_ROOM1) | (1ULL << PIN_LED_ROOM2) |
                         (1ULL << PIN_BUZZER_IN) | (1ULL << PIN_BUZZER_OUT),
-        .mode = GPIO_MODE_OUTPUT
-    };
+        .mode = GPIO_MODE_OUTPUT};
     gpio_config(&out);
 
     gpio_config_t pir = {
         .pin_bit_mask = (1ULL << PIN_PIR1) | (1ULL << PIN_PIR2),
-        .mode = GPIO_MODE_INPUT
-    };
+        .mode = GPIO_MODE_INPUT};
     gpio_config(&pir);
 
     /* GPIO36/39: input-only, no internal pull-up (external 10k pull-ups in the diagram) */
     gpio_config_t btn_ext = {
         .pin_bit_mask = (1ULL << PIN_BTN_ENTRY_OK) | (1ULL << PIN_BTN_ENTRY_BAD),
-        .mode = GPIO_MODE_INPUT
-    };
+        .mode = GPIO_MODE_INPUT};
     gpio_config(&btn_ext);
 
     /* GPIO0: internal pull-up */
     gpio_config_t btn_int = {
         .pin_bit_mask = (1ULL << PIN_BTN_EXIT),
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE
-    };
+        .pull_up_en = GPIO_PULLUP_ENABLE};
     gpio_config(&btn_int);
 
     ledc_timer_config_t tcfg = {
@@ -1381,16 +1380,14 @@ static void gpio_init_all(void)
         .duty_resolution = LEDC_TIMER_13_BIT,
         .timer_num = LEDC_TIMER_0,
         .freq_hz = 50,
-        .clk_cfg = LEDC_AUTO_CLK
-    };
+        .clk_cfg = LEDC_AUTO_CLK};
     ledc_timer_config(&tcfg);
 
     ledc_channel_config_t ccfg = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
         .timer_sel = LEDC_TIMER_0,
         .duty = 0,
-        .hpoint = 0
-    };
+        .hpoint = 0};
 
     ccfg.gpio_num = PIN_SERVO_IN;
     ccfg.channel = g_door_in.channel;
